@@ -354,7 +354,7 @@ class EbayClientTests(unittest.TestCase):
         self.database.mark_connection_verified(
             self.database.connection_generation(), "sandbox-user"
         )
-        for stage in ("quantities", "images", "migration"):
+        for stage in ("quantities", "images", "migration", "publish"):
             with self.subTest(stage=stage):
                 config = replace(self.config, feature_stage=stage, scopes=DRAFT_SCOPES)
                 client = EbaySandboxClient(config, self.database, transport=FakeTransport())
@@ -396,7 +396,7 @@ class EbayClientTests(unittest.TestCase):
         this application stage" (INVALID_OAUTH_INTENT). This is exactly
         what happened on the user's real Production account after the
         first fix went in."""
-        for stage in ("quantities", "images", "migration"):
+        for stage in ("quantities", "images", "migration", "publish"):
             with self.subTest(stage=stage):
                 # A fresh temp database per stage avoids any state-carryover
                 # between iterations -- each is an independent "already on

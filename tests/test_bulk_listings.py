@@ -366,3 +366,125 @@ class BulkListingBatchTests(BulkListingServiceTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+IMAGE_HEADER = "sku,title,description,condition,quantity,price,category_id,aspects,image_urls\n"
+IMAGE_A = "https://images.example.com/a.jpg"
+IMAGE_B = "https://images.example.com/b.jpg"
+
+
+class BulkListingImageCsvTests(unittest.TestCase):
+    def load(self, image_cell: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_csv(
+                tmp,
+                IMAGE_HEADER + f'SKU-1,Item one,Description one,NEW,2,19.99,12345,,"{image_cell}"\n',
+            )
+            return load_and_validate_csv(path, "GBP")
+
+    def test_pipe_separated_images_are_parsed_in_order(self):
+        batch = self.load(f"{IMAGE_A} | {IMAGE_B}")
+        self.assertEqual(batch.row_errors, ())
+        self.assertEqual(batch.drafts[0][1]["image_urls"], [IMAGE_A, IMAGE_B])
+
+    def test_an_empty_image_cell_or_missing_column_means_no_images(self):
+        batch = self.load("")
+        self.assertNotIn("image_urls", batch.drafts[0][1])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_csv(tmp, HEADER + "SKU-1,Item one,Description one,NEW,2,19.99,12345,\n")
+            batch = load_and_validate_csv(path, "GBP")
+        self.assertNotIn("image_urls", batch.drafts[0][1])
+
+    def test_invalid_image_cells_are_row_errors_not_crashes(self):
+        too_many = "|".join(f"https://images.example.com/{n}.jpg" for n in range(25))
+        for cell in (
+            "http://images.example.com/a.jpg",  # not https
+            "https://user:pw@images.example.com/a.jpg",  # embedded credentials
+            "https://images.example.com/a.jpg#frag",  # fragment
+            "https://localhost/a.jpg",
+            "https://127.0.0.1/a.jpg",
+            "https://192.168.1.10/a.jpg",
+            f"{IMAGE_A}|{IMAGE_A}",  # duplicate
+            f"{IMAGE_A}||{IMAGE_B}",  # empty entry
+            "https://images.example.com/a b.jpg",  # whitespace
+            too_many,
+            "not a url",
+        ):
+            with self.subTest(cell=cell):
+                batch = self.load(cell)
+                self.assertEqual(batch.drafts, ())
+                self.assertIn("image_urls", batch.row_errors[0].errors)
+
+    def test_image_and_draft_errors_on_one_row_are_reported_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_csv(
+                tmp, IMAGE_HEADER + "SKU-1,Item one,Description one,NEW,0,19.99,12345,,http://x.example/a.jpg\n"
+            )
+            batch = load_and_validate_csv(path, "GBP")
+        self.assertEqual(set(batch.row_errors[0].errors), {"quantity", "image_urls"})
+
+
+class BulkListingImageBatchTests(BulkListingServiceTestCase):
+    def test_images_are_sent_on_create_and_reconciled_on_readback(self):
+        import json as _json
+
+        self.grant()
+        responses = item_creation_responses(
+            "SKU-1", "OFFER-1", title="Example item", description="Example description"
+        )
+        responses[2] = json_response(
+            200,
+            {
+                **inventory_item("SKU-1", title="Example item", description="Example description"),
+                "product": {
+                    "title": "Example item",
+                    "description": "Example description",
+                    "imageUrls": [IMAGE_A, IMAGE_B],
+                },
+            },
+        )
+        client = self.make_client(responses)
+        service = BulkListingService(client, self.database, self.config)
+        results = service.create_batch(
+            service.verified_binding(), [(2, self.draft("SKU-1", image_urls=[IMAGE_A, IMAGE_B]))]
+        )
+
+        self.assertEqual([r.status for r in results], ["created"])
+        put = client.transport.calls[1]
+        self.assertEqual(put["method"], "PUT")
+        self.assertEqual(_json.loads(put["body"])["product"]["imageUrls"], [IMAGE_A, IMAGE_B])
+
+    def test_a_readback_with_missing_or_reordered_images_is_unknown_not_created(self):
+        self.grant()
+        for returned in ([], [IMAGE_B, IMAGE_A], None):
+            with self.subTest(returned=returned):
+                product = {"title": "Example item", "description": "Example description"}
+                if returned is not None:
+                    product["imageUrls"] = returned
+                client = self.make_client(
+                    [
+                        not_found(),
+                        HttpResponse(204, {}, b""),
+                        json_response(
+                            200,
+                            {**inventory_item("SKU-1", title="x", description="x"), "product": product},
+                        ),
+                    ]
+                )
+                service = BulkListingService(client, self.database, self.config)
+                results = service.create_batch(
+                    service.verified_binding(),
+                    [(2, self.draft("SKU-1", image_urls=[IMAGE_A, IMAGE_B]))],
+                )
+                self.assertEqual(results[0].status, "unknown")
+
+    def test_a_draft_without_images_sends_no_imageUrls_field(self):
+        import json as _json
+
+        self.grant()
+        client = self.make_client(
+            item_creation_responses("SKU-1", "OFFER-1", title="Example item", description="Example description")
+        )
+        service = BulkListingService(client, self.database, self.config)
+        service.create_batch(service.verified_binding(), [(2, self.draft("SKU-1"))])
+        self.assertNotIn("imageUrls", _json.loads(client.transport.calls[1]["body"])["product"])

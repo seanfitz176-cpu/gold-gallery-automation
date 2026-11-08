@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -158,7 +158,7 @@ class OAuthStateRecord:
 
 
 class AppDatabase:
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
     OAUTH_STATE_INTENTS = {"connect", "scope_upgrade"}
     ACTION_KINDS = {"create_draft", "change_price", "change_quantity", "add_image"}
     ACTION_STATUSES = {
@@ -475,6 +475,55 @@ class AppDatabase:
                     max_change_percent TEXT,
                     updated_at INTEGER NOT NULL
                 );
+
+                -- Schema v11: autonomy engine (docs/autonomy_engine.md). All
+                -- three tables hold the owner's own business inputs or the
+                -- engine's own proposals -- never credentials or raw eBay
+                -- responses -- so, like price_limits, they are plain columns.
+                -- Money and percentages are stored as validated decimal strings.
+                CREATE TABLE IF NOT EXISTS sku_costs (
+                    sku TEXT PRIMARY KEY,
+                    item_cost TEXT NOT NULL,
+                    postage_cost TEXT NOT NULL,
+                    fee_percent TEXT NOT NULL,
+                    margin_percent TEXT,
+                    currency TEXT NOT NULL,
+                    -- A one-off restock instruction: "I now have N of this SKU".
+                    -- stock_pending=1 until the engine has turned it into a
+                    -- proposal once; it is never re-applied, because the engine
+                    -- cannot see later sales and re-applying would oversell.
+                    stock_quantity INTEGER,
+                    stock_pending INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS engine_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS engine_proposals (
+                    proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sku TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('price', 'quantity', 'republish')),
+                    current_value TEXT NOT NULL,
+                    proposed_value TEXT NOT NULL,
+                    currency TEXT,
+                    reason TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN ('auto', 'queue')),
+                    status TEXT NOT NULL CHECK (status IN (
+                        'pending', 'approved', 'rejected', 'executed',
+                        'expired', 'failed', 'unknown', 'superseded'
+                    )),
+                    outcome TEXT,
+                    action_id TEXT,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS engine_proposals_pending_idx
+                    ON engine_proposals (status, sku, kind);
 
                 CREATE INDEX IF NOT EXISTS actions_created_idx ON actions (created_at DESC);
                 CREATE INDEX IF NOT EXISTS action_events_action_idx
@@ -1518,6 +1567,198 @@ class AppDatabase:
                 "DELETE FROM price_limits WHERE sku = ?", (sku,)
             )
             return cursor.rowcount > 0
+
+    # -- Autonomy engine: per-SKU cost table (schema v11) ------------------
+
+    def set_sku_cost(
+        self,
+        sku: str,
+        *,
+        item_cost: str,
+        postage_cost: str,
+        fee_percent: str,
+        currency: str,
+        margin_percent: Optional[str] = None,
+        stock_quantity: Optional[int] = None,
+    ) -> None:
+        """Create or replace one SKU's cost row. All values are pre-validated
+        decimal strings (see ``engine_pricing.parse_cost_row``);
+        ``margin_percent`` of ``None`` means "use the global default, if any"."""
+        now = int(self._now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO sku_costs
+                    (sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                     stock_quantity, stock_pending, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sku) DO UPDATE SET
+                    item_cost = excluded.item_cost,
+                    postage_cost = excluded.postage_cost,
+                    fee_percent = excluded.fee_percent,
+                    margin_percent = excluded.margin_percent,
+                    currency = excluded.currency,
+                    stock_quantity = COALESCE(excluded.stock_quantity, sku_costs.stock_quantity),
+                    stock_pending = CASE WHEN excluded.stock_quantity IS NOT NULL THEN 1
+                                         ELSE sku_costs.stock_pending END,
+                    updated_at = excluded.updated_at
+                """,
+                (sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                 stock_quantity, 1 if stock_quantity is not None else 0, now),
+            )
+
+    def get_sku_cost(self, sku: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                       stock_quantity, stock_pending, updated_at
+                FROM sku_costs WHERE sku = ?
+                """,
+                (sku,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_sku_costs(self) -> Tuple[Dict[str, Any], ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                       stock_quantity, stock_pending, updated_at
+                FROM sku_costs ORDER BY sku ASC
+                """
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    def clear_stock_pending(self, sku: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("UPDATE sku_costs SET stock_pending = 0 WHERE sku = ?", (sku,))
+
+    def delete_sku_cost(self, sku: str) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute("DELETE FROM sku_costs WHERE sku = ?", (sku,))
+            return cursor.rowcount > 0
+
+    # -- Autonomy engine: state and proposals (schema v11) -----------------
+
+    def get_engine_state(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM engine_state WHERE key = ?", (key,)
+            ).fetchone()
+            return str(row["value"]) if row is not None else None
+
+    def set_engine_state(self, key: str, value: str) -> None:
+        now = int(self._now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO engine_state (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, now),
+            )
+
+    def delete_engine_state(self, key: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM engine_state WHERE key = ?", (key,))
+
+    def record_engine_proposal(
+        self,
+        *,
+        sku: str,
+        kind: str,
+        current_value: str,
+        proposed_value: str,
+        currency: Optional[str],
+        reason: str,
+        decision: str,
+        ttl_seconds: int,
+    ) -> int:
+        """Store one proposal. Any older still-pending proposal for the same
+        SKU and kind is marked ``superseded`` in the same transaction, so at
+        most one pending proposal per SKU/kind ever exists."""
+        now = int(self._now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE engine_proposals SET status = 'superseded', updated_at = ?
+                WHERE sku = ? AND kind = ? AND status = 'pending'
+                """,
+                (now, sku, kind),
+            )
+            cursor = self._connection.execute(
+                """
+                INSERT INTO engine_proposals
+                    (sku, kind, current_value, proposed_value, currency, reason, decision,
+                     status, created_at, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (sku, kind, current_value, proposed_value, currency, reason, decision,
+                 now, now + int(ttl_seconds), now),
+            )
+            return int(cursor.lastrowid)
+
+    def list_engine_proposals(
+        self, statuses: Sequence[str] = ("pending",), limit: int = 500
+    ) -> Tuple[Dict[str, Any], ...]:
+        placeholders = ",".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT proposal_id, sku, kind, current_value, proposed_value, currency, reason,
+                       decision, status, outcome, action_id, created_at, expires_at, updated_at
+                FROM engine_proposals WHERE status IN ({placeholders})
+                ORDER BY created_at DESC, proposal_id DESC LIMIT ?
+                """,
+                (*statuses, int(limit)),
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    def get_engine_proposal(self, proposal_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT proposal_id, sku, kind, current_value, proposed_value, currency, reason,
+                       decision, status, outcome, action_id, created_at, expires_at, updated_at
+                FROM engine_proposals WHERE proposal_id = ?
+                """,
+                (int(proposal_id),),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def set_engine_proposal_status(
+        self,
+        proposal_id: int,
+        status: str,
+        *,
+        expected: str = "pending",
+        outcome: Optional[str] = None,
+        action_id: Optional[str] = None,
+    ) -> bool:
+        """Compare-and-set, so a proposal can never be acted on twice."""
+        now = int(self._now())
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE engine_proposals
+                SET status = ?, updated_at = ?,
+                    outcome = COALESCE(?, outcome), action_id = COALESCE(?, action_id)
+                WHERE proposal_id = ? AND status = ?
+                """,
+                (status, now, outcome[:500] if outcome else None, action_id, int(proposal_id), expected),
+            )
+            return cursor.rowcount == 1
+
+    def expire_engine_proposals(self) -> int:
+        now = int(self._now())
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE engine_proposals SET status = 'expired', updated_at = ? "
+                "WHERE status = 'pending' AND expires_at <= ?",
+                (now, now),
+            )
+            return cursor.rowcount
 
     def record_deletion_notification_processed(
         self, notification_id: str, user_id: str, *, matched_owner: bool

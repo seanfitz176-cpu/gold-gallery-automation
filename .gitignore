@@ -72,3 +72,8 @@ instance/.production_admin_password.txt
 .cf_api_token
 account_deletion_worker/.cf_api_token
 oauth_relay_worker/.cf_api_token
+
+# Autonomous Claude session controls -- owner-local state, never committed
+.claude/STOP
+.claude/checkpoints/*.approved
+.claude/settings.local.json

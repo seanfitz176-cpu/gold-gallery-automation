@@ -27,6 +27,13 @@ RUNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 # HTTPS callback relay forwards the browser to this loopback URL.
 CANONICAL_HOST = "127.0.0.1"
 CANONICAL_PORT = 5000
+# Phase 5 (second seller account, docs/second_account.md): one extra port is
+# allowed so a second, fully separate copy of the app can run at the same
+# time. eBay's OAuth relay always returns to CANONICAL_PORT, so an instance
+# on SECONDARY_PORT can never start an eBay sign-in -- it is connected once
+# while temporarily run on 5000, then used day to day on 5001.
+SECONDARY_PORT = 5001
+ALLOWED_PORTS = (CANONICAL_PORT, SECONDARY_PORT)
 CANONICAL_CALLBACK_PATH = "/oauth/callback"
 CANONICAL_CALLBACK_URL = (
     f"http://{CANONICAL_HOST}:{CANONICAL_PORT}{CANONICAL_CALLBACK_PATH}"
@@ -131,11 +138,21 @@ PRODUCTION_WRITE_OPT_INS: Dict[str, Tuple[str, str]] = {
         "APP_ALLOW_PRODUCTION_LISTING_MIGRATION",
         "yes-i-understand-the-risk-of-migrating-a-live-listing",
     ),
+    # Publishing makes an existing UNPUBLISHED Offer live and visible to
+    # buyers via eBay's publishOffer call (same sell.inventory write scope).
+    # Like migration it is its own script-only island, not cumulative with
+    # prices/quantities/images, and like prices/quantities/images it honours
+    # APP_DRY_RUN (which defaults to true in production).
+    "publish": (
+        "APP_ALLOW_PRODUCTION_PUBLISH",
+        "yes-i-understand-the-risk-of-publishing-live-listings",
+    ),
 }
 # Back-compat names for the "prices" entry -- unchanged from before this
 # dict existed, since other modules and tests already import these two names
 # directly.
 PRODUCTION_WRITE_OPT_IN_ENV_VAR, PRODUCTION_WRITE_OPT_IN_VALUE = PRODUCTION_WRITE_OPT_INS["prices"]
+ENGINE_MODES: Tuple[str, ...] = ("off", "shadow", "auto-dry", "auto")
 PRODUCTION_READ_ONLY_STAGES: Tuple[str, ...] = ("connection", "account", "listings", "orders")
 
 SANDBOX_API_ORIGIN = "https://api.sandbox.ebay.com"
@@ -201,6 +218,10 @@ def scopes_for_stage(feature_stage: str, fallback: Tuple[str, ...] = ()) -> Tupl
         # same sell.inventory (write) scope drafts/prices/quantities/images
         # already use -- no additional OAuth consent is required to reach
         # this stage either.
+        return DRAFT_SCOPES
+    if feature_stage == "publish":
+        # publishOffer is part of the Sell Inventory API, gated by the same
+        # sell.inventory (write) scope -- no additional OAuth consent needed.
         return DRAFT_SCOPES
     if feature_stage == "setup":
         return SETUP_SCOPES
@@ -408,6 +429,27 @@ class AppConfig:
     max_price_change_percent: Decimal = Decimal("10")
     max_actions_per_run: int = 10
     require_price_floor: bool = True
+    # Autonomy engine (docs/autonomy_engine.md). "off" is today's behaviour.
+    # There is deliberately no default margin: None means a SKU without its
+    # own margin_percent is reported but never repriced (see §10 D1).
+    engine_mode: str = "off"
+    engine_default_margin_percent: Optional[Decimal] = None
+    engine_reprice_hours: int = 24
+    engine_relist_minutes: int = 60
+    engine_orders_minutes: int = 30
+    # Shown on every page and email when set; required on SECONDARY_PORT.
+    account_label: Optional[str] = None
+    # Email alerts (ebay_app/alerts.py). All unset = alerts off. The app
+    # password is a credential the owner enters; it is never logged or shown.
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_user: Optional[str] = None
+    smtp_app_password: Optional[str] = None
+    alert_email: Optional[str] = None
+    engine_digest_hours: int = 6
+    # Read-only comparison with similar live listings (Browse API). Off by
+    # default: eBay may require Buy API approval for production use.
+    engine_market_check: bool = False
     # The kill switch's other half: when true, PriceService.confirm() claims
     # and journals the action exactly as normal but never calls eBay at all,
     # recording a result with "dry_run": True instead. Defaults to false
@@ -477,11 +519,12 @@ def load_config(
         "quantities",
         "images",
         "migration",
+        "publish",
         "setup",
     }:
         raise ConfigError(
             "APP_FEATURE_STAGE must be connection, account, listings, orders, drafts, "
-            "prices, quantities, images, migration or setup"
+            "prices, quantities, images, migration, publish or setup"
         )
     if environment == "production" and feature_stage not in PRODUCTION_READ_ONLY_STAGES:
         write_opt_in = PRODUCTION_WRITE_OPT_INS.get(feature_stage)
@@ -592,9 +635,21 @@ def load_config(
             f"HOST must remain {CANONICAL_HOST} for the permanent local OAuth callback"
         )
     configured_port = _integer(env, "PORT", CANONICAL_PORT, 1, 65535)
-    if configured_port != CANONICAL_PORT:
+    account_label = env.get("APP_ACCOUNT_LABEL", "").strip()
+    if account_label and (
+        len(account_label) > 40
+        or not re.fullmatch(r"[A-Za-z0-9 ._-]+", account_label)
+    ):
+        raise ConfigError("APP_ACCOUNT_LABEL must be 1-40 letters, digits, spaces, dots, dashes or underscores")
+    if configured_port not in ALLOWED_PORTS:
         raise ConfigError(
-            f"PORT must remain {CANONICAL_PORT} for the permanent local OAuth callback"
+            f"PORT must remain {CANONICAL_PORT} for the permanent local OAuth callback "
+            f"(or {SECONDARY_PORT} for a labelled second-account copy)"
+        )
+    if configured_port == SECONDARY_PORT and not account_label:
+        raise ConfigError(
+            f"PORT {SECONDARY_PORT} is only for a second-account copy: set APP_ACCOUNT_LABEL "
+            "(e.g. APP_ACCOUNT_LABEL=Second shop) so the two accounts can never be confused"
         )
     if environment == "production":
         api_origin = PRODUCTION_API_ORIGIN
@@ -641,6 +696,14 @@ def load_config(
             raise ConfigError(
                 "ACCOUNT_DELETION_STATUS_SECRET must be 32-1024 visible ASCII characters"
             )
+    engine_mode = env.get("APP_ENGINE_MODE", "off").strip().lower() or "off"
+    if engine_mode not in ENGINE_MODES:
+        raise ConfigError("APP_ENGINE_MODE must be off, shadow, auto-dry or auto")
+    if engine_mode in {"auto-dry", "auto"} and feature_stage not in {"prices", "quantities", "images"}:
+        raise ConfigError(
+            "APP_ENGINE_MODE auto-dry/auto needs APP_FEATURE_STAGE prices, quantities or images "
+            "(the engine executes only through those already-gated services)"
+        )
     config = AppConfig(
         client_id=private_values["EBAY_CLIENT_ID"],
         client_secret=private_values["EBAY_CLIENT_SECRET"],
@@ -656,7 +719,8 @@ def load_config(
         return_policy_id=optional_seller_values["EBAY_RETURN_POLICY_ID"],
         database_path=database_path,
         host=CANONICAL_HOST,
-        port=CANONICAL_PORT,
+        port=configured_port,
+        account_label=account_label or None,
         allowed_hosts=LOCAL_ALLOWED_HOSTS,
         cookie_secure=False,
         request_timeout_seconds=_integer(env, "EBAY_REQUEST_TIMEOUT_SECONDS", 15, 3, 60),
@@ -678,5 +742,21 @@ def load_config(
         max_actions_per_run=_integer(env, "APP_MAX_ACTIONS_PER_RUN", 10, 1, 1000),
         require_price_floor=_boolean(env, "APP_REQUIRE_PRICE_FLOOR", True),
         dry_run=_boolean(env, "APP_DRY_RUN", environment == "production"),
+        engine_mode=engine_mode,
+        engine_default_margin_percent=(
+            _decimal(env, "APP_ENGINE_DEFAULT_MARGIN_PERCENT", Decimal("0"), Decimal("0"), Decimal("1000"))
+            if env.get("APP_ENGINE_DEFAULT_MARGIN_PERCENT", "").strip()
+            else None
+        ),
+        engine_reprice_hours=_integer(env, "APP_ENGINE_REPRICE_HOURS", 24, 1, 168),
+        engine_relist_minutes=_integer(env, "APP_ENGINE_RELIST_MINUTES", 60, 5, 1440),
+        engine_orders_minutes=_integer(env, "APP_ENGINE_ORDERS_MINUTES", 30, 5, 1440),
+        smtp_host=env.get("APP_SMTP_HOST", "").strip() or None,
+        smtp_port=_integer(env, "APP_SMTP_PORT", 587, 1, 65535),
+        smtp_user=env.get("APP_SMTP_USER", "").strip() or None,
+        smtp_app_password=env.get("APP_SMTP_APP_PASSWORD", "").strip() or None,
+        alert_email=env.get("APP_ALERT_EMAIL", "").strip() or None,
+        engine_digest_hours=_integer(env, "APP_ENGINE_DIGEST_HOURS", 6, 1, 168),
+        engine_market_check=_boolean(env, "APP_ENGINE_MARKET_CHECK", False),
     )
     return config

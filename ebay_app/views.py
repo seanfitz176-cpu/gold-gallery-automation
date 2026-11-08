@@ -167,6 +167,17 @@ def oauth_handoff_page(
             "does not publish, delete, change price, change quantity, or add "
             "images."
         )
+    elif feature_stage == "publish":
+        permission = (
+            f"read access to the {environment} user's identity and orders, plus "
+            "Inventory permission to publish existing unpublished offers"
+        )
+        boundary = (
+            "This permission is used only by the standalone bulk_publish_listings.py "
+            "script, run separately by the owner from a terminal, after a typed "
+            "confirmation. There is no dashboard route that uses it -- it does not "
+            "delete, change price, change quantity, or add images."
+        )
     else:
         permission = f"read-only access to the {environment} user's identity"
         boundary = "No listing, order, price or inventory API is enabled."
@@ -201,6 +212,7 @@ def dashboard_page(
     quantity_permission: bool = False,
     image_permission: bool = False,
     migration_permission: bool = False,
+    publish_permission: bool = False,
 ) -> str:
     if feature_stage in {
         "connection",
@@ -213,6 +225,7 @@ def dashboard_page(
         "quantities",
         "images",
         "migration",
+        "publish",
     }:
         required_permission = {
             "drafts": draft_permission,
@@ -222,12 +235,13 @@ def dashboard_page(
             "quantities": quantity_permission,
             "images": image_permission,
             "migration": migration_permission,
+            "publish": publish_permission,
         }.get(feature_stage, listing_permission)
         if (
             feature_stage
             in {
                 "listings", "orders", "drafts", "setup", "prices", "quantities",
-                "images", "migration",
+                "images", "migration", "publish",
             }
             and status.get("connected")
             and status.get("verified")
@@ -241,6 +255,7 @@ def dashboard_page(
                 "quantities": f"Inventory management for {environment} quantity changes",
                 "images": f"Inventory management for {environment} listing images",
                 "migration": f"Inventory management for {environment} listing migration",
+                "publish": f"Inventory management for publishing {environment} listings",
             }.get(feature_stage, "Inventory access")
             button_label = {
                 "drafts": f"Authorize unpublished {environment} drafts",
@@ -250,11 +265,12 @@ def dashboard_page(
                 "quantities": f"Authorize {environment} quantity changes",
                 "images": f"Authorize {environment} image changes",
                 "migration": f"Authorize {environment} listing migration",
+                "publish": f"Authorize {environment} listing publishing",
             }.get(feature_stage, "Authorize read-only listings")
             permission_qualifier = (
                 ""
                 if feature_stage
-                in {"drafts", "setup", "prices", "quantities", "images", "migration"}
+                in {"drafts", "setup", "prices", "quantities", "images", "migration", "publish"}
                 else "read-only "
             )
             connection = f"""<div class="notice warning"><strong>One additional permission is required.</strong>
@@ -557,6 +573,17 @@ def dashboard_page(
             anything in {h(environment)}. There is no dashboard button for this --
             migration is a rare, one-off action, not a recurring change.</p></section>"""
             title = f"Listing migration ({environment})"
+        elif feature_stage == "publish":
+            boundary = f"""<section class="card"><h2>Publishing listings</h2>
+            <p>This stage only adds Inventory-management permission to the existing grant.
+            It makes no eBay change by itself.</p>
+            <p>Once authorized, run
+            <code>python3 bulk_publish_listings.py &lt;csv&gt;</code> in a terminal. That
+            script re-reads every Offer, shows exactly which ones it will publish, honours
+            the dry-run switch and the actions-per-run budget, and requires a typed
+            confirmation before it changes anything in {h(environment)}. There is no
+            dashboard button for this.</p></section>"""
+            title = f"Publishing listings ({environment})"
         else:
             boundary = """<section class="card"><h2>Phase 1 boundary</h2>
             <p>Only OAuth token refresh and <code>GET Identity /user/</code> are enabled.</p>
@@ -1369,3 +1396,90 @@ def account_deletion_banner_page(deletion_state: Mapping[str, Any], csrf_token: 
         authenticated=True,
         csrf_token=csrf_token,
     )
+
+
+def engine_page(
+    status: Mapping[str, Any],
+    pending: Sequence[Mapping[str, Any]],
+    csrf_token: str,
+    environment: str = "Sandbox",
+    flashes: Sequence[Tuple[str, str]] = (),
+) -> str:
+    """Read-only engine report plus pause/resume/run-now controls."""
+    from .engine import describe
+
+    headline, detail = describe(dict(status))
+    paused = bool(status.get("paused_reason"))
+    kind = "warning" if paused or status.get("mode") == "off" else "info"
+    control_action, control_label = ("/engine/resume", "Resume engine") if paused else ("/engine/pause", "Pause engine")
+    controls = f"""<form method="post" action="{control_action}" class="inline">
+      <input type="hidden" name="csrf_token" value="{h(csrf_token)}">
+      <button type="submit">{h(control_label)}</button></form>
+    <form method="post" action="/engine/run" class="inline">
+      <input type="hidden" name="csrf_token" value="{h(csrf_token)}">
+      <button type="submit" class="secondary">Re-check prices on next tick</button></form>"""
+    margin = status.get("default_margin_percent")
+    settings = (f"<p>Mode <code>{h(status.get('mode'))}</code> · reprice every "
+                f"{h(status.get('reprice_hours'))} h · default margin "
+                f"{h(str(margin) + '%' if margin else 'none (per-SKU only)')}</p>")
+    report = status.get("report") or {}
+    rows = report.get("rows") or []
+    row_html = "".join(
+        "<tr>"
+        f"<td><code>{h(r.get('sku'))}</code></td>"
+        f"<td>{h(r.get('currency'))} {h(r.get('live_price'))}</td>"
+        f"<td>{h(r.get('total_cost') or '-')}</td>"
+        f"<td>{h((r.get('implied_margin') + '%') if r.get('implied_margin') else '-')}</td>"
+        f"<td>{h((r.get('margin_used') + '%') if r.get('margin_used') else '-')}</td>"
+        f"<td>{h(r.get('target') or '-')}</td>"
+        f"<td>{h((str(r.get('market_low')) + ' / ' + str(r.get('market_median')) + ' (' + str(r.get('market_count')) + ')') if r.get('market_median') else '-')}</td>"
+        f"<td>{h(r.get('proposed') or '-')}</td>"
+        f"<td>{h(r.get('status'))}</td>"
+        f"<td>{h(r.get('reason'))}</td>"
+        "</tr>"
+        for r in rows
+    ) or '<tr><td colspan="10">No report yet. The first run happens on the next engine tick.</td></tr>'
+    generated = report.get("generated_at")
+    def _proposal_buttons(p):
+        pid = h(str(p["proposal_id"]))
+        return (
+            f'<form method="post" action="/engine/approve" class="inline">'
+            f'<input type="hidden" name="csrf_token" value="{h(csrf_token)}">'
+            f'<input type="hidden" name="proposal_id" value="{pid}">'
+            f'<button type="submit">Approve</button></form> '
+            f'<form method="post" action="/engine/reject" class="inline">'
+            f'<input type="hidden" name="csrf_token" value="{h(csrf_token)}">'
+            f'<input type="hidden" name="proposal_id" value="{pid}">'
+            f'<button type="submit" class="secondary">Reject</button></form>'
+        )
+
+    def _reject_only(p):
+        pid = h(str(p["proposal_id"]))
+        return (
+            f'<form method="post" action="/engine/reject" class="inline">'
+            f'<input type="hidden" name="csrf_token" value="{h(csrf_token)}">'
+            f'<input type="hidden" name="proposal_id" value="{pid}">'
+            f'<button type="submit" class="secondary">Dismiss</button></form>'
+        )
+
+    executes = bool(status.get("executes"))
+    pending_html = "".join(
+        f"<tr><td><code>{h(p['sku'])}</code></td><td>{h(p['kind'])}</td>"
+        f"<td>{h(p.get('currency') or '')} {h(p['current_value'])} &rarr; {h(p['proposed_value'])}</td>"
+        f"<td>{h(p['decision'])}</td><td>{h(p['reason'])}"
+        f"{('<br><em>' + h(p['outcome']) + '</em>') if p.get('outcome') else ''}</td>"
+        f"<td>{_proposal_buttons(p) if executes and p['kind'] in ('price', 'quantity') else _reject_only(p)}</td></tr>"
+        for p in pending
+    ) or '<tr><td colspan="6">No pending proposals.</td></tr>'
+    body = f"""<div class="notice {kind}"><strong>{h(headline)}</strong> {h(detail)}</div>
+    <section class="card">{settings}{controls}</section>
+    <section class="card"><h2>Last price check</h2>
+    <p>{h('Generated at ' + str(generated) + ' (Unix time) · ' + str(report.get('listings', 0)) + ' listings · ' + str(report.get('proposals', 0)) + ' proposals · market check ' + str(report.get('market_check', 'off'))) if generated else 'Not run yet.'}</p>
+    <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Live</th><th>Cost</th>
+    <th>Current margin</th><th>Target margin</th><th>Target</th><th>Market low / median (n)</th><th>Proposed</th><th>Status</th><th>Why</th></tr></thead>
+    <tbody>{row_html}</tbody></table></div></section>
+    <section class="card"><h2>Pending proposals</h2>
+    <p>{h('Approve runs the change through the normal price-change checks (floor, max change, actions budget, live-price re-check, dry-run switch). Proposals expire after 24 hours.' if executes else 'Execution is unavailable in this configuration.')}</p>
+    <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Kind</th><th>Change</th><th>Route</th><th>Why</th><th></th></tr></thead>
+    <tbody>{pending_html}</tbody></table></div></section>"""
+    return layout(f"Autonomy engine ({environment})", body, authenticated=True, csrf_token=csrf_token, flashes=flashes)

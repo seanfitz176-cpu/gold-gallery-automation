@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(python3 -m unittest:*)",
+      "Bash(python -m unittest:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.production)",
+      "Read(./.env.bak*)",
+      "Read(./instance/**)",
+      "Read(./.cf_api_token)",
+      "Edit(./.env*)",
+      "Bash(git push:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/gate.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop_gate.py"
+          }
+        ]
+      }
+    ]
+  }
+}

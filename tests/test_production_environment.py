@@ -661,7 +661,7 @@ class ViewFunctionProductionLabelTests(unittest.TestCase):
         consent screen was misleading."""
         from ebay_app.views import oauth_handoff_page
 
-        for stage in ("prices", "quantities", "images", "migration"):
+        for stage in ("prices", "quantities", "images", "migration", "publish"):
             with self.subTest(stage=stage):
                 rendered = oauth_handoff_page(
                     "https://auth.ebay.com/authorize?state=x",

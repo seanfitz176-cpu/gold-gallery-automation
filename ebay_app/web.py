@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import html
 import logging
 import re
 import threading
@@ -16,6 +17,7 @@ from .config import (
     AppConfig,
     CANONICAL_HOST,
     CANONICAL_PORT,
+    ALLOWED_PORTS,
     DRAFT_SCOPES,
     LISTING_SCOPES,
     ORDER_SCOPES,
@@ -70,7 +72,11 @@ from .views import (
     quantity_action_page,
     image_review_page,
     image_action_page,
+    engine_page,
 )
+
+ENGINE_ROUTES = frozenset({"/engine", "/engine/pause", "/engine/resume", "/engine/run",
+                           "/engine/approve", "/engine/reject"})
 
 
 class RequestError(ValueError):
@@ -273,10 +279,11 @@ class WebApplication:
         image_service: Optional[ImageService] = None,
         sessions: Optional[SessionManager] = None,
         logger: Optional[logging.Logger] = None,
+        engine: Optional[Any] = None,
     ) -> None:
         if (
             config.host != CANONICAL_HOST
-            or config.port != CANONICAL_PORT
+            or config.port not in ALLOWED_PORTS
             or config.allowed_hosts != (CANONICAL_HOST,)
             or config.cookie_secure
             or config.runtime_mode != "local"
@@ -310,6 +317,8 @@ class WebApplication:
         self.sessions = sessions or SessionManager(config.cookie_secure)
         self.logger = logger or logging.getLogger("ebay_sandbox_app")
         self.login_limiter = LoginFailureLimiter()
+        # The autonomy engine (ebay_app/engine.py), when APP_ENGINE_MODE is not off.
+        self.engine = engine
         self.style = (Path(__file__).resolve().parents[1] / "static" / "style.css").read_bytes()
 
     def __call__(self, environ, start_response):
@@ -347,6 +356,15 @@ class WebApplication:
                 500,
             )
 
+        if self.config.account_label and response.content_type.startswith("text/html"):
+            # Phase 5: with two account copies running, every page names its account.
+            label = html.escape(self.config.account_label).encode("utf-8")
+            response.body = response.body.replace(
+                b'<main class="shell" id="main">',
+                b'<main class="shell" id="main"><div class="notice info" role="status"><strong>Account: '
+                + label + b"</strong></div>",
+                1,
+            )
         if self.config.environment == "production" and response.content_type.startswith(
             "text/html"
         ):
@@ -390,7 +408,7 @@ class WebApplication:
             raise RequestError("Invalid Host header", 400) from exc
         if (
             parsed.hostname != CANONICAL_HOST
-            or port != CANONICAL_PORT
+            or port != self.config.port
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path
@@ -569,6 +587,10 @@ class WebApplication:
             # broader write/Inventory scope migration needs, exactly like
             # "setup" above.
             "migration": {"/", "/connect", "/connection/verify", "/logout"},
+            # Publish, like migration, happens only through a standalone
+            # script (bulk_publish_listings.py); the dashboard exists for
+            # sign-in and the OAuth permission upgrade only.
+            "publish": {"/", "/connect", "/connection/verify", "/logout"},
         }
         # ``full`` is retained only for the dormant later-stage unit tests. The
         # environment loader rejects it, so a real process can run only an
@@ -578,10 +600,16 @@ class WebApplication:
             and request.method == "GET"
             and re.fullmatch(r"/actions/[a-f0-9]{32}", request.path) is not None
         )
+        engine_route = (
+            request.path in ENGINE_ROUTES
+            and self.engine is not None
+            and self.config.engine_mode != "off"
+        )
         if (
             self.config.feature_stage != "full"
             and request.path not in stage_routes.get(self.config.feature_stage, set())
             and not dynamic_draft_result
+            and not engine_route
         ):
             raise RequestError(
                 f"This feature is locked until a later {self.config.environment.capitalize()} "
@@ -641,10 +669,20 @@ class WebApplication:
                     and granted_scopes_cover(
                         self.database.granted_scopes(), DRAFT_SCOPES
                     ),
-                )
+                    self.config.feature_stage == "publish"
+                    and granted_scopes_cover(
+                        self.database.granted_scopes(), DRAFT_SCOPES
+                    ),
+                ).replace("</main>", self._engine_dashboard_card() + "</main>", 1)
             )
         if request.path == "/connect" and request.method == "POST":
             self._check_csrf(request, session)
+            if self.config.port != CANONICAL_PORT:
+                raise RequestError(
+                    f"eBay sign-in only returns to port {CANONICAL_PORT}. Stop the other copy, run this "
+                    f"one once with PORT={CANONICAL_PORT} to connect, then switch back.",
+                    409,
+                )
             authorization_url = self._validate_authorization_url(
                 self.ebay.authorization_url(session.session_id)
             )
@@ -724,6 +762,54 @@ class WebApplication:
             return self._save_price_limit(request, session)
         if request.path == "/price-limits/delete" and request.method == "POST":
             return self._delete_price_limit(request, session)
+        if engine_route and request.path == "/engine" and request.method == "GET":
+            flashes = list(session.flashes)
+            session.flashes.clear()
+            return Response.html(engine_page(
+                self.engine.status(),
+                self.database.list_engine_proposals(("pending",), limit=200),
+                session.csrf_token,
+                self.config.environment.capitalize(),
+                flashes,
+            ))
+        if engine_route and request.method == "POST" and request.path in {"/engine/approve", "/engine/reject"}:
+            self._check_csrf(request, session)
+            raw_id = Request.one(request.form, "proposal_id").strip()
+            if not raw_id.isdigit() or len(raw_id) > 12:
+                raise RequestError("Proposal not found", 404)
+            proposal_id = int(raw_id)
+            if request.path == "/engine/reject":
+                if self.database.set_engine_proposal_status(proposal_id, "rejected", outcome="Rejected by the owner."):
+                    session.flashes.append(("info", f"Proposal {proposal_id} rejected; nothing changed."))
+                else:
+                    session.flashes.append(("warning", f"Proposal {proposal_id} is no longer pending."))
+                return Response.redirect("/engine")
+            if self.engine.paused_reason():
+                session.flashes.append(("warning", "Resume the engine before approving proposals."))
+                return Response.redirect("/engine")
+            outcome = self.engine.execute_proposal(
+                proposal_id, force_dry_run=self.config.engine_mode == "auto-dry"
+            )
+            record = self.database.get_engine_proposal(proposal_id) or {}
+            kind = {"executed": "success", "budget": "warning", "superseded": "info"}.get(outcome, "error")
+            if outcome == "not_pending":
+                message = f"Proposal {proposal_id} is no longer pending, or execution is unavailable."
+            else:
+                message = f"Proposal {proposal_id}: {outcome}. {record.get('outcome') or ''}".strip()
+            session.flashes.append((kind, message))
+            return Response.redirect("/engine")
+        if engine_route and request.method == "POST" and request.path in {"/engine/pause", "/engine/resume", "/engine/run"}:
+            self._check_csrf(request, session)
+            if request.path == "/engine/pause":
+                self.engine.pause("Paused from the dashboard")
+                session.flashes.append(("warning", "Engine paused. No job will run until you resume it."))
+            elif request.path == "/engine/resume":
+                self.engine.resume()
+                session.flashes.append(("success", "Engine resumed."))
+            else:
+                self.engine.request_reprice()
+                session.flashes.append(("info", "A price check will run on the next engine tick (within a minute)."))
+            return Response.redirect("/engine")
         if request.path == "/quantities/review" and request.method == "POST":
             return self._review_quantity(request, session)
         if request.path == "/images/review" and request.method == "POST":
@@ -796,6 +882,17 @@ class WebApplication:
                 action_page(action, session.csrf_token, self.config.environment.capitalize())
             )
         raise RequestError("Page not found", 404)
+
+    def _engine_dashboard_card(self) -> str:
+        """A link to the engine page on the dashboard, only when it is on."""
+        if self.engine is None or self.config.engine_mode == "off":
+            return ""
+        from .engine import describe
+        from .views import h
+
+        headline, _detail = describe(self.engine.status())
+        return (f'<section class="card"><h2>Autonomy engine</h2><p>{h(headline)}</p>'
+                '<p><a href="/engine">Open the engine page</a></p></section>')
 
     def _account_deletion(
         self, request: Request, session: Session, deletion_state: Mapping[str, Any]

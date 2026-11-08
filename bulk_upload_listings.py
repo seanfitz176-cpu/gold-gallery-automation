@@ -12,12 +12,14 @@ hand-created draft already gets.
 
 THIS SCRIPT NEVER PUBLISHES ANYTHING. Every item it creates is an
 UNPUBLISHED Offer -- there is no code path anywhere in this app that can
-publish, and that remains a separate, deliberate future decision. It also
-never attaches an image (see the module docstring for why).
+publish, and that remains a separate, deliberate future decision. Images
+are optional: an ``image_urls`` column of up to 24 https addresses separated
+by ``|`` is sent with each Inventory item and checked exactly on readback.
 
 CSV FORMAT: a header row naming (case-insensitively, any order) sku, title,
 description, condition, quantity, price, category_id, and optionally
-aspects (a JSON object, e.g. {"Brand": ["Acme"]}). SKUs are used exactly as
+aspects (a JSON object, e.g. {"Brand": ["Acme"]}) and image_urls
+(https://.../a.jpg|https://.../b.jpg, first = main picture). SKUs are used exactly as
 given -- no automatic suffix is added, unlike the dashboard's own one-off
 draft form. Every row uses the account's single configured currency.
 
@@ -87,7 +89,8 @@ def main(argv: List[str]) -> int:
               f"{config.environment.capitalize()}:\n")
         for row_number, draft in batch.drafts:
             print(f"  Line {row_number}: SKU={draft['sku']!r}  {draft['title']!r}  "
-                  f"{draft['currency']} {draft['price']}  qty={draft['quantity']}")
+                  f"{draft['currency']} {draft['price']}  qty={draft['quantity']}  "
+                  f"images={len(draft.get('image_urls') or [])}")
         print(
             "\nThese become real Inventory items/Offers on your account, but none of them "
             "are published or visible to buyers -- every one is UNPUBLISHED, exactly like a "

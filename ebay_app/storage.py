@@ -158,7 +158,7 @@ class OAuthStateRecord:
 
 
 class AppDatabase:
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
     OAUTH_STATE_INTENTS = {"connect", "scope_upgrade"}
     ACTION_KINDS = {"create_draft", "change_price", "change_quantity", "add_image"}
     ACTION_STATUSES = {
@@ -475,6 +475,47 @@ class AppDatabase:
                     max_change_percent TEXT,
                     updated_at INTEGER NOT NULL
                 );
+
+                -- Schema v11: autonomy engine (docs/autonomy_engine.md). All
+                -- three tables hold the owner's own business inputs or the
+                -- engine's own proposals -- never credentials or raw eBay
+                -- responses -- so, like price_limits, they are plain columns.
+                -- Money and percentages are stored as validated decimal strings.
+                CREATE TABLE IF NOT EXISTS sku_costs (
+                    sku TEXT PRIMARY KEY,
+                    item_cost TEXT NOT NULL,
+                    postage_cost TEXT NOT NULL,
+                    fee_percent TEXT NOT NULL,
+                    margin_percent TEXT,
+                    currency TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS engine_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS engine_proposals (
+                    proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sku TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('price', 'quantity', 'republish')),
+                    current_value TEXT NOT NULL,
+                    proposed_value TEXT NOT NULL,
+                    currency TEXT,
+                    reason TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK (decision IN ('auto', 'queue')),
+                    status TEXT NOT NULL CHECK (status IN (
+                        'pending', 'approved', 'rejected', 'executed',
+                        'expired', 'failed', 'unknown', 'superseded'
+                    )),
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS engine_proposals_pending_idx
+                    ON engine_proposals (status, sku, kind);
 
                 CREATE INDEX IF NOT EXISTS actions_created_idx ON actions (created_at DESC);
                 CREATE INDEX IF NOT EXISTS action_events_action_idx
@@ -1517,6 +1558,65 @@ class AppDatabase:
             cursor = self._connection.execute(
                 "DELETE FROM price_limits WHERE sku = ?", (sku,)
             )
+            return cursor.rowcount > 0
+
+    # -- Autonomy engine: per-SKU cost table (schema v11) ------------------
+
+    def set_sku_cost(
+        self,
+        sku: str,
+        *,
+        item_cost: str,
+        postage_cost: str,
+        fee_percent: str,
+        currency: str,
+        margin_percent: Optional[str] = None,
+    ) -> None:
+        """Create or replace one SKU's cost row. All values are pre-validated
+        decimal strings (see ``engine_pricing.parse_cost_row``);
+        ``margin_percent`` of ``None`` means "use the global default, if any"."""
+        now = int(self._now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO sku_costs
+                    (sku, item_cost, postage_cost, fee_percent, margin_percent, currency, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sku) DO UPDATE SET
+                    item_cost = excluded.item_cost,
+                    postage_cost = excluded.postage_cost,
+                    fee_percent = excluded.fee_percent,
+                    margin_percent = excluded.margin_percent,
+                    currency = excluded.currency,
+                    updated_at = excluded.updated_at
+                """,
+                (sku, item_cost, postage_cost, fee_percent, margin_percent, currency, now),
+            )
+
+    def get_sku_cost(self, sku: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency, updated_at
+                FROM sku_costs WHERE sku = ?
+                """,
+                (sku,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_sku_costs(self) -> Tuple[Dict[str, Any], ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency, updated_at
+                FROM sku_costs ORDER BY sku ASC
+                """
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    def delete_sku_cost(self, sku: str) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute("DELETE FROM sku_costs WHERE sku = ?", (sku,))
             return cursor.rowcount > 0
 
     def record_deletion_notification_processed(

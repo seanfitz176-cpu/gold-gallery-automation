@@ -119,11 +119,43 @@ next tick:
 
 Each step ships with tests and stays at `off` by default.
 
-## 10. Decisions still needed from you
-- **D1. Default margin:** for example 30% over cost, overridable per SKU.
-- **D2. What counts as cost:** item cost only, or item cost plus postage
-  and eBay fees.
-- **D3. Where cost comes from:** typed in or uploaded per SKU, or worked
-  out from gold melt value (weight × purity × spot price), which would need
-  a live price feed.
-- **D4. Cadence:** are the defaults in §2 OK?
+## 10. Decisions (answered and researched 2026-11-08)
+- **D2. Cost** = item + postage + eBay fees. Research showed that UK private
+  sellers pay **no** final value fee or regulatory fee (vehicles excepted).
+  The buyer pays a Buyer Protection fee that never comes out of the seller's
+  payout. So `fee_percent` **defaults to 0** for this account. It stays a
+  per-SKU field so that a later switch to a business account, or a category
+  with fees, can be represented. The one exception is a 3% international fee
+  for a private seller delivering outside the UK, which isn't modelled
+  because sales are domestic. Insertion fees (300 free listings a month,
+  then 35p each) are per listing, not per sale, so they don't belong in the
+  repricing formula. They do matter for the 300-listing bulk upload.
+- **D3. Cost source:** entered or uploaded per SKU (`import_costs.py`).
+- **D1. Margin: deliberately no global default.** The sources we found
+  (reseller blogs quoting 20–50% for jewellery and resale) aren't a sound
+  basis for one number across this account's mix. Instead:
+  1. In `shadow` mode the engine reports each SKU's **implied current
+     margin**: live price against item + postage, after fees.
+  2. You then set `margin_percent` per SKU, or set
+     `APP_ENGINE_DEFAULT_MARGIN_PERCENT`, from that real data.
+  3. A SKU with no margin, from either source, is reported but **never
+     repriced**.
+  4. A **break-even guard** is always on, so the price never drops below
+     (item + postage) / (1 − fee%).
+- **D4. Cadence:** the eBay Inventory API default limit is 2 million calls a
+  day, so API limits aren't a constraint at this account's size. With a
+  fixed margin over a fixed cost, the target price **only changes when you
+  edit the cost, margin or postage**. Repricing more often than daily
+  achieves nothing and adds needless price changes. Defaults:
+  `APP_ENGINE_REPRICE_HOURS=24`, plus one run straight after any cost
+  import; relist check every 60 min (driven by sales); order watch every
+  30 min.
+- **Known limitation, recommended follow-up:** a fixed margin ignores the
+  market. A target above comparable listings won't sell, and one below
+  leaves money behind. The shadow report should later add a read-only
+  comparison with similar live listings, using eBay's Browse API with the
+  app token, so you can sanity-check each margin.
+
+Sources: ebay.co.uk/help/selling/fees-credits-invoices/selling-fees?id=4364;
+developer.ebay.com/develop/get-started/api-call-limits;
+developer.ebay.com/api-docs/sell/static/inventory/bulk-updates.html.

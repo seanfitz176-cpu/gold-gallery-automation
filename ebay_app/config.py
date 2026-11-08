@@ -145,6 +145,7 @@ PRODUCTION_WRITE_OPT_INS: Dict[str, Tuple[str, str]] = {
 # dict existed, since other modules and tests already import these two names
 # directly.
 PRODUCTION_WRITE_OPT_IN_ENV_VAR, PRODUCTION_WRITE_OPT_IN_VALUE = PRODUCTION_WRITE_OPT_INS["prices"]
+ENGINE_MODES: Tuple[str, ...] = ("off", "shadow", "auto-dry", "auto")
 PRODUCTION_READ_ONLY_STAGES: Tuple[str, ...] = ("connection", "account", "listings", "orders")
 
 SANDBOX_API_ORIGIN = "https://api.sandbox.ebay.com"
@@ -421,6 +422,14 @@ class AppConfig:
     max_price_change_percent: Decimal = Decimal("10")
     max_actions_per_run: int = 10
     require_price_floor: bool = True
+    # Autonomy engine (docs/autonomy_engine.md). "off" is today's behaviour.
+    # There is deliberately no default margin: None means a SKU without its
+    # own margin_percent is reported but never repriced (see §10 D1).
+    engine_mode: str = "off"
+    engine_default_margin_percent: Optional[Decimal] = None
+    engine_reprice_hours: int = 24
+    engine_relist_minutes: int = 60
+    engine_orders_minutes: int = 30
     # The kill switch's other half: when true, PriceService.confirm() claims
     # and journals the action exactly as normal but never calls eBay at all,
     # recording a result with "dry_run": True instead. Defaults to false
@@ -655,6 +664,14 @@ def load_config(
             raise ConfigError(
                 "ACCOUNT_DELETION_STATUS_SECRET must be 32-1024 visible ASCII characters"
             )
+    engine_mode = env.get("APP_ENGINE_MODE", "off").strip().lower() or "off"
+    if engine_mode not in ENGINE_MODES:
+        raise ConfigError("APP_ENGINE_MODE must be off, shadow, auto-dry or auto")
+    if engine_mode in {"auto-dry", "auto"} and feature_stage not in {"prices", "quantities", "images"}:
+        raise ConfigError(
+            "APP_ENGINE_MODE auto-dry/auto needs APP_FEATURE_STAGE prices, quantities or images "
+            "(the engine executes only through those already-gated services)"
+        )
     config = AppConfig(
         client_id=private_values["EBAY_CLIENT_ID"],
         client_secret=private_values["EBAY_CLIENT_SECRET"],
@@ -692,5 +709,14 @@ def load_config(
         max_actions_per_run=_integer(env, "APP_MAX_ACTIONS_PER_RUN", 10, 1, 1000),
         require_price_floor=_boolean(env, "APP_REQUIRE_PRICE_FLOOR", True),
         dry_run=_boolean(env, "APP_DRY_RUN", environment == "production"),
+        engine_mode=engine_mode,
+        engine_default_margin_percent=(
+            _decimal(env, "APP_ENGINE_DEFAULT_MARGIN_PERCENT", Decimal("0"), Decimal("0"), Decimal("1000"))
+            if env.get("APP_ENGINE_DEFAULT_MARGIN_PERCENT", "").strip()
+            else None
+        ),
+        engine_reprice_hours=_integer(env, "APP_ENGINE_REPRICE_HOURS", 24, 1, 168),
+        engine_relist_minutes=_integer(env, "APP_ENGINE_RELIST_MINUTES", 60, 5, 1440),
+        engine_orders_minutes=_integer(env, "APP_ENGINE_ORDERS_MINUTES", 30, 5, 1440),
     )
     return config

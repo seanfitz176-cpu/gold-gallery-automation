@@ -40,7 +40,8 @@ In an interactive session, Esc interrupts immediately.
 - CHECKPOINT: owner signs off the design and answers the decisions
 
 ## Phase 4 — Scheduler, policy engine and approval queue (dry-run only)
-- [ ] Per-SKU cost table: storage (schema migration), dashboard page, CSV import
+- [x] Per-SKU cost table: storage (schema v11), pricing maths (`engine_pricing.py`), `import_costs.py` CSV import, engine settings in config
+- [ ] Dashboard page listing costs, implied current margin and break-even per SKU (read-only)
 - [ ] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause
 - [ ] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
 - [ ] `/queue` approval page executing through the existing services with a fixed engine session

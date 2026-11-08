@@ -59,7 +59,7 @@ LIVE_COMMAND_PATTERNS = [
     re.compile(r"\b(migrate_listing|bulk_upload_listings|bulk_publish_listings|publish_test_offer|"
                r"setup_business_policies|find_category|find_pilot_candidate|"
                r"check_connection|check_account|check_pilot_preconditions|"
-               r"export_audit_log)\.py\b"),
+               r"export_audit_log|import_costs)\.py\b"),
     re.compile(r"\bebay\.com\b"),
     re.compile(r"\bwrangler\b"),
 ]

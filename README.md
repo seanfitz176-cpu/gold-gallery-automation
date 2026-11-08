@@ -30,7 +30,7 @@ account remain intentionally rejected until each is separately reviewed.
 | Image linking (URL-based; not raw file upload) on a published Offer | Implemented, live-verified in Sandbox |
 | Publishing an Offer, ending/withdrawing a listing | Not implemented (no route or eBay call exists) |
 | Order fulfillment writes (shipment/tracking upload), refunds, cancellations | Not implemented (orders are read-only) |
-| Bulk-creating many new unpublished Inventory items/Offers from a CSV file | Implemented as a standalone script, `bulk_upload_listings.py`, looping the same reviewed create-and-verify pipeline used for one draft at a time; needs no new opt-in beyond whichever of `drafts`/`prices`/`quantities`/`images` is already configured. Never publishes and never attaches an image. |
+| Bulk-creating many new unpublished Inventory items/Offers from a CSV file | Implemented as a standalone script, `bulk_upload_listings.py`, looping the same reviewed create-and-verify pipeline used for one draft at a time; needs no new opt-in beyond whichever of `drafts`/`prices`/`quantities`/`images` is already configured. Never publishes. Optional `image_urls` column (up to 24 https addresses, `|`-separated) is sent with each item and reconciled exactly on readback. |
 | Bulk *editing* of existing listings, templates, reporting/analytics | Not implemented |
 | Production read-only access (connection/account/listings/orders) | Implemented, live-verified against the real account |
 | Production price, quantity, or image changes against a real account | Implemented, each behind its own two separate explicit opt-ins (`APP_ALLOW_PRODUCTION_ENVIRONMENT` plus the stage's own `APP_ALLOW_PRODUCTION_PRICE_WRITES` / `APP_ALLOW_PRODUCTION_QUANTITY_WRITES` / `APP_ALLOW_PRODUCTION_IMAGE_WRITES`); none of these three opt-ins is set in this project's own `.env.production` today, and each defaults to dry-run (`APP_DRY_RUN=true`) once it is, so no real write happens until that is also explicitly disabled |
@@ -216,9 +216,26 @@ python3 bulk_upload_listings.py path/to/listings.csv               # Sandbox
 python3 bulk_upload_listings.py path/to/listings.csv --production    # Production
 ```
 
-It never publishes anything and never attaches an image -- every row it
-creates is an UNPUBLISHED Offer, exactly like the dashboard's own one-item
-draft flow.
+It never publishes anything -- every row it creates is an UNPUBLISHED
+Offer, exactly like the dashboard's own one-item draft flow. An optional
+`image_urls` column takes up to 24 https image addresses separated by `|`
+(the first is the main picture); they are sent in the Inventory item's
+`product.imageUrls` and must read back exactly, in order, or the row is
+reported `unknown`. Loading the CSV never contacts the image hosts.
+
+## Autonomous Claude sessions
+
+`.claude/` holds guard rails for letting Claude Code work through
+`PLAN.md` unattended: a gate hook that blocks secrets, live eBay commands,
+pushes and edits while a checkpoint awaits approval, and a Stop hook that
+keeps Claude working until the phase is done. Your controls:
+
+```sh
+python3 .claude/ctl.py stop | resume | status | approve N | reject N
+```
+
+Run autonomous sessions in a clean clone with **no** `.env`/`.env.production`
+-- the gate refuses to run the test suite beside a real `.env.production`.
 
 ```sh
 source .venv/bin/activate

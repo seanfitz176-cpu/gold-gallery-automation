@@ -1786,6 +1786,11 @@ class EbaySandboxClient:
         }
         if draft.get("aspects"):
             product["aspects"] = draft["aspects"]
+        # Only bulk-created drafts carry image_urls (the dashboard's single
+        # draft form deliberately does not accept them), so a dashboard
+        # draft's payload is byte-for-byte unchanged.
+        if draft.get("image_urls"):
+            product["imageUrls"] = list(draft["image_urls"])
         return {
             "availability": {
                 "shipToLocationAvailability": {"quantity": draft["quantity"]}
@@ -1897,6 +1902,17 @@ class EbaySandboxClient:
                 else returned_aspects is None
                 or (isinstance(returned_aspects, Mapping) and not returned_aspects)
             )
+            expected_images = list(draft.get("image_urls") or [])
+            returned_images = (
+                product.get("imageUrls") if isinstance(product, Mapping) else None
+            )
+            # Exact, ordered match: the first image is the main picture.
+            images_match = (
+                returned_images == expected_images
+                if expected_images
+                else returned_images is None
+                or (isinstance(returned_images, list) and not returned_images)
+            )
             matches = (
                 isinstance(item, Mapping)
                 and item.get("sku") == draft["sku"]
@@ -1905,6 +1921,7 @@ class EbaySandboxClient:
                 and product.get("title") == draft["title"]
                 and product.get("description") == draft["description"]
                 and aspects_match
+                and images_match
                 and isinstance(returned_quantity, int)
                 and not isinstance(returned_quantity, bool)
                 and returned_quantity == draft["quantity"]

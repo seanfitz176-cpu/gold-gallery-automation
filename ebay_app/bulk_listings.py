@@ -23,11 +23,15 @@ WHAT THIS DELIBERATELY DOES NOT DO:
   Offer, exactly like every other draft this app has ever created -- there
   is no code path anywhere in this app that can publish, and adding one is
   a separate, deliberate decision this module does not make implicitly.
-- It never attaches an image. eBay's Inventory API has no image field on an
-  unpublished item's own creation call, and this app's only image
-  capability (``ImageService``) only ever adds to an *already published*
-  Offer, one URL at a time -- so images for a freshly bulk-created batch
-  remain a separate, not-yet-built step.
+- It never fetches, downloads, or hosts an image. An optional
+  ``image_urls`` column lets each row name up to 24 seller-hosted https
+  image addresses, which are sent in the Inventory item's own
+  ``product.imageUrls`` field at creation time and reconciled exactly on
+  readback, like every other field. The addresses are checked structurally
+  only (https, no credentials or fragment, no localhost or private IP
+  literal, length, count, no duplicates) -- loading the CSV still makes no
+  network call. eBay itself fetches the images when the listing is later
+  published.
 - It never retries a failed row automatically, and one row's failure never
   stops any other row from being attempted -- each row is fully independent.
 
@@ -54,7 +58,11 @@ CSV FORMAT: one row per listing. The header row must name every column in
 description, condition, quantity, price, category_id. ``aspects`` is an
 optional extra column; when present it must be a JSON object shaped exactly
 like the dashboard's own draft form accepts, e.g. ``{"Brand": ["Acme"]}`` --
-an empty cell means no aspects for that row. There is no ``currency``
+an empty cell means no aspects for that row. ``image_urls`` is a second
+optional column: zero to 24 https image addresses separated by ``|`` (the
+first is the main picture), e.g.
+``https://example.com/a.jpg|https://example.com/b.jpg``; an empty cell means
+no images for that row. There is no ``currency``
 column: every row uses the account's single configured currency
 (``AppConfig.currency``), matching every other part of this app. SKUs are
 used exactly as given in the CSV -- unlike the dashboard's single-draft
@@ -66,6 +74,8 @@ against a collision with anything already on the account.
 from __future__ import annotations
 
 import csv
+import ipaddress
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Set, Tuple
@@ -84,8 +94,66 @@ REQUIRED_COLUMNS: Tuple[str, ...] = (
     "price",
     "category_id",
 )
-OPTIONAL_COLUMNS: Tuple[str, ...] = ("aspects",)
+OPTIONAL_COLUMNS: Tuple[str, ...] = ("aspects", "image_urls")
 ALL_COLUMNS: Tuple[str, ...] = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
+# The columns handed to the dashboard's own ``validate_draft``. ``image_urls``
+# is deliberately validated separately (``parse_image_urls``) because the
+# dashboard's single-draft form intentionally does not accept images.
+DRAFT_FORM_COLUMNS: Tuple[str, ...] = REQUIRED_COLUMNS + ("aspects",)
+
+# eBay's documented maximum number of pictures per listing.
+MAX_IMAGES_PER_LISTING = 24
+# Matches ``image_fetch.MAX_URL_LENGTH``, the limit the published-listing
+# image path already applies.
+MAX_IMAGE_URL_LENGTH = 2000
+IMAGE_URL_SEPARATOR = "|"
+
+
+def parse_image_urls(raw: str) -> List[str]:
+    """Split and structurally validate one row's ``image_urls`` cell.
+
+    Returns the list of addresses (possibly empty). Raises ``ValueError``
+    with a plain-English message on the first problem. Makes no network
+    call: reachability and content are checked by eBay when it fetches the
+    pictures at publish time.
+    """
+
+    if not raw.strip():
+        return []
+    urls = [part.strip() for part in raw.split(IMAGE_URL_SEPARATOR)]
+    if any(not url for url in urls):
+        raise ValueError("Image addresses must be separated by a single | with no empty entries.")
+    if len(urls) > MAX_IMAGES_PER_LISTING:
+        raise ValueError(f"A listing can have at most {MAX_IMAGES_PER_LISTING} images.")
+    if len(set(urls)) != len(urls):
+        raise ValueError("The same image address is listed more than once.")
+    for url in urls:
+        if len(url) > MAX_IMAGE_URL_LENGTH or any(
+            ord(character) <= 0x20 or ord(character) == 0x7F for character in url
+        ):
+            raise ValueError("Each image address must be a plain https:// link with no spaces.")
+        try:
+            parsed = urllib.parse.urlsplit(url)
+        except ValueError as exc:
+            raise ValueError("Each image address must be a plain https:// link.") from exc
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError("Each image address must be a plain https:// link.")
+        host = parsed.hostname.lower()
+        if host == "localhost" or host.endswith(".localhost"):
+            raise ValueError("Image addresses must point at a public host.")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("Image addresses must point at a public host.")
+    return urls
 
 # A generous but finite safety cap, matching this project's standing
 # "fail closed rather than run away" principle -- not a tuned business
@@ -160,13 +228,24 @@ def load_and_validate_csv(path: Path, currency: str) -> ValidatedBatch:
             }
             sku_hint = normalized_row.get("sku", "")
             form: Dict[str, List[str]] = {
-                column: [normalized_row.get(column, "")] for column in ALL_COLUMNS
+                column: [normalized_row.get(column, "")] for column in DRAFT_FORM_COLUMNS
             }
+            errors: Dict[str, str] = {}
+            draft: Dict[str, Any] | None = None
             try:
                 draft = validate_draft(form, currency)
             except ValidationError as error:
-                row_errors.append(RowError(row_number, sku_hint, dict(error.errors)))
+                errors.update(error.errors)
+            try:
+                image_urls = parse_image_urls(normalized_row.get("image_urls", ""))
+            except ValueError as error:
+                errors["image_urls"] = str(error)
+                image_urls = []
+            if errors or draft is None:
+                row_errors.append(RowError(row_number, sku_hint, errors))
                 continue
+            if image_urls:
+                draft["image_urls"] = image_urls
             if draft["sku"] in seen_skus:
                 row_errors.append(
                     RowError(

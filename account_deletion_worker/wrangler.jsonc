@@ -1,0 +1,36 @@
+{
+	// Standalone Worker: eBay Marketplace Account Deletion/Closure receiver.
+	// Independent of oauth_relay_worker; deploy it separately.
+	// The name MUST match WORKER_NAME in src/index.js (host pinning depends on it).
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "ebay-account-deletion-receiver",
+	"main": "src/index.js",
+	"compatibility_date": "2026-10-01",
+	// Serve only on <name>.<account-subdomain>.workers.dev. No preview URLs,
+	// no custom routes (the host pinning in src/index.js rejects any other host).
+	"workers_dev": true,
+	"preview_urls": false,
+	// No logs, traces or Logpush: nothing from these requests is retained
+	// outside the KV queue.
+	"observability": {
+		"enabled": false
+	},
+	"logpush": false,
+	// Queue of untrusted notifications for the local verifier to collect.
+	// Create it with:  npx wrangler kv namespace create DELETION_EVENTS
+	// then paste the printed id below.
+	"kv_namespaces": [
+		{
+			"binding": "DELETION_EVENTS",
+			"id": "514815da3a164129890ecf76a4d2bd01",
+			"remote": true
+		}
+	]
+	// Secrets (never put them in this file):
+	//   npx wrangler secret put DELETION_VERIFICATION_TOKEN
+	//   npx wrangler secret put STATUS_API_SECRET
+	// Watch list (recommended; set as secrets so they survive deploys and stay
+	// out of version control):
+	//   npx wrangler secret put WATCHED_EBAY_USER_IDS
+	//   npx wrangler secret put WATCHED_EBAY_USERNAMES
+}

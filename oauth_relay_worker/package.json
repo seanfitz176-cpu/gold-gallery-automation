@@ -1,0 +1,8 @@
+{
+  "name": "ebay-sandbox-oauth-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/index.test.mjs"
+  }
+}

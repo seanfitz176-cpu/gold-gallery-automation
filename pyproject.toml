@@ -1,0 +1,7 @@
+[project]
+name = "ebay-sandbox-console"
+version = "1.0.0"
+description = "A small confirmed-action eBay Sandbox console"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=42.0.0,<50.0.0"]

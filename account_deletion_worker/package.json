@@ -1,0 +1,8 @@
+{
+  "name": "ebay-account-deletion-receiver",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

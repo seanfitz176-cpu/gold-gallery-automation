@@ -231,7 +231,7 @@ app to see, on the dashboard's **Autonomy engine** page (`/engine`), each
 listing's cost, current margin, target price and the change the engine *would*
 propose. Nothing is executed yet. Load costs first with
 `python3 import_costs.py costs.csv` (app stopped; columns `sku,item_cost` plus
-optional `postage_cost,fee_percent,margin_percent`). There is no default margin:
+optional `postage_cost,fee_percent,margin_percent,stock_quantity`; `stock_quantity` is a one-off restock instruction the engine applies once). There is no default margin:
 a SKU without one is reported but never repriced. **Pause engine** on that page
 stops every job until you resume it.
 

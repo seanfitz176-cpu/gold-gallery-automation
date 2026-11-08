@@ -59,17 +59,25 @@ Jobs only **propose** actions. Nothing is executed inside a job.
 - A SKU with **no cost recorded is never repriced.** It's listed once in a
   daily email instead.
 
-## 5. Relisting when there's stock
-- **Recommended setup:** turn on eBay's *out-of-stock option* for the account
-  in Seller Hub. A GTC listing that hits zero then stays live but hidden,
-  rather than ending. "Relisting" becomes a quantity restore through the
-  existing `QuantityService`, a write that is already built, tested and
-  gated.
-- If a listing has actually ended, the engine queues a "republish" proposal
-  for your approval, at least until the republish behaviour is confirmed in
-  Sandbox. It never republishes an ended listing automatically.
-- "Has stock" means the Inventory item's own quantity is above 0. The
-  engine never invents stock.
+## 5. Relisting when there's stock (as built)
+- **Where stock comes from:** the engine can't see your physical stock. You
+  tell it with an optional `stock_quantity` column in the cost CSV
+  (`import_costs.py`). That figure is a **one-off restock instruction**
+  ("I now have 3 of SKU X"). The engine turns it into **one** proposal and
+  then forgets it. It never re-applies an old figure, because it can't see
+  sales made since and re-applying would oversell.
+- **Live listing, quantity differs** (including 0, i.e. out of stock): a
+  `quantity` proposal goes to the instruction's figure. It executes through
+  the existing `QuantityService`, which needs stage `quantities` or
+  `images`. If the live quantity changed between proposal and execution, for
+  example because the item sold, the proposal is superseded and nothing
+  changes.
+- **No live listing:** a `republish` proposal is created as advice only.
+  It's never executed, and the page offers only Dismiss. Publishing stays
+  with `bulk_publish_listings.py`.
+- Recommended: turn on eBay's out-of-stock option in Seller Hub, so a
+  sold-out GTC listing stays live at quantity 0 rather than ending.
+- Runs every `APP_ENGINE_RELIST_MINUTES` (default 60).
 
 ## 6. Modes, pause and kill switches
 `APP_ENGINE_MODE` has four modes, rolled out in this order:

@@ -1452,13 +1452,22 @@ def engine_page(
             f'<button type="submit" class="secondary">Reject</button></form>'
         )
 
+    def _reject_only(p):
+        pid = h(str(p["proposal_id"]))
+        return (
+            f'<form method="post" action="/engine/reject" class="inline">'
+            f'<input type="hidden" name="csrf_token" value="{h(csrf_token)}">'
+            f'<input type="hidden" name="proposal_id" value="{pid}">'
+            f'<button type="submit" class="secondary">Dismiss</button></form>'
+        )
+
     executes = bool(status.get("executes"))
     pending_html = "".join(
         f"<tr><td><code>{h(p['sku'])}</code></td><td>{h(p['kind'])}</td>"
         f"<td>{h(p.get('currency') or '')} {h(p['current_value'])} &rarr; {h(p['proposed_value'])}</td>"
         f"<td>{h(p['decision'])}</td><td>{h(p['reason'])}"
         f"{('<br><em>' + h(p['outcome']) + '</em>') if p.get('outcome') else ''}</td>"
-        f"<td>{_proposal_buttons(p) if executes else ''}</td></tr>"
+        f"<td>{_proposal_buttons(p) if executes and p['kind'] in ('price', 'quantity') else _reject_only(p)}</td></tr>"
         for p in pending
     ) or '<tr><td colspan="6">No pending proposals.</td></tr>'
     body = f"""<div class="notice {kind}"><strong>{h(headline)}</strong> {h(detail)}</div>

@@ -45,6 +45,7 @@ STATE_LAST_REPRICE = "last_reprice_at"
 STATE_REPORT = "last_reprice_report"
 STATE_ERRORS = "consecutive_errors"
 STATE_REPRICE_REQUESTED = "reprice_requested"
+STATE_LAST_RESTOCK = "last_restock_at"
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class LiveListing:
     sku: str
     price_value: str
     currency: str
+    available_quantity: Optional[int] = None
 
 
 ListingReader = Callable[[], Iterable[LiveListing]]
@@ -68,6 +70,7 @@ class Engine:
         logger: Optional[logging.Logger] = None,
         ebay=None,
         price_service=None,
+        quantity_service=None,
     ) -> None:
         self.config = config
         self.database = database
@@ -78,7 +81,8 @@ class Engine:
         # The app's own PriceService, shared so there is ONE actions-per-run
         # budget for manual and engine changes together.
         self.price_service = price_service
-        self._dry_run_service = None
+        self.quantity_service = quantity_service
+        self._dry_run_services: Dict[str, object] = {}
         self._execute_lock = threading.Lock()
 
     # -- pause / status ---------------------------------------------------
@@ -100,7 +104,7 @@ class Engine:
 
     def executes(self) -> bool:
         """Whether proposals can be executed (approved or auto)."""
-        return self.ebay is not None and self.price_service is not None
+        return self.ebay is not None and (self.price_service is not None or self.quantity_service is not None)
 
     def status(self) -> Dict[str, object]:
         report_raw = self.database.get_engine_state(STATE_REPORT)
@@ -132,6 +136,12 @@ class Engine:
             return True
         return self.now() - int(last) >= self.config.engine_reprice_hours * 3600
 
+    def _restock_due(self) -> bool:
+        last = self.database.get_engine_state(STATE_LAST_RESTOCK)
+        if not last or not last.isdigit():
+            return True
+        return self.now() - int(last) >= self.config.engine_relist_minutes * 60
+
     def tick(self) -> None:
         """One scheduler pass. Safe to call at any time."""
         if self.config.engine_mode == "off":
@@ -139,16 +149,16 @@ class Engine:
         self.database.expire_engine_proposals()
         if self.paused_reason():
             return
-        if not self._reprice_due():
-            self.run_auto()
-            return
         try:
-            self.run_reprice()
+            if self._reprice_due():
+                self.run_reprice()
+            if self._restock_due():
+                self.run_restock()
             self.run_auto()
         except Exception as error:  # noqa: BLE001 - recorded, counted, never re-raised
             count = int(self.database.get_engine_state(STATE_ERRORS) or "0") + 1
             self.database.set_engine_state(STATE_ERRORS, str(count))
-            self.logger.warning("Engine reprice job failed (%s in a row): %s", count, type(error).__name__)
+            self.logger.warning("Engine job failed (%s in a row): %s", count, type(error).__name__)
             if count >= AUTO_PAUSE_AFTER_ERRORS:
                 self.pause(f"Paused automatically after {count} consecutive job errors "
                            f"(last: {type(error).__name__}: {error})")
@@ -157,14 +167,17 @@ class Engine:
 
     # -- execution ------------------------------------------------------------
 
-    def _service(self, force_dry_run: bool):
-        if not force_dry_run:
-            return self.price_service
-        if self._dry_run_service is None:
+    def _service(self, kind: str, force_dry_run: bool):
+        shared = self.price_service if kind == "price" else self.quantity_service
+        if not force_dry_run or shared is None:
+            return shared
+        if kind not in self._dry_run_services:
             from .prices import PriceService
+            from .quantities import QuantityService
 
-            self._dry_run_service = PriceService(self.ebay, self.database, replace(self.config, dry_run=True))
-        return self._dry_run_service
+            cls = PriceService if kind == "price" else QuantityService
+            self._dry_run_services[kind] = cls(self.ebay, self.database, replace(self.config, dry_run=True))
+        return self._dry_run_services[kind]
 
     def _finish(self, proposal_id: int, status: str, outcome: str, action_id: Optional[str] = None) -> str:
         self.database.set_engine_proposal_status(
@@ -190,12 +203,15 @@ class Engine:
             if proposal["expires_at"] <= self.now():
                 self.database.set_engine_proposal_status(proposal_id, "expired", outcome="Expired before execution.")
                 return "expired"
-            if proposal["kind"] != "price":
+            kind = proposal["kind"]
+            if kind not in {"price", "quantity"}:
+                return "not_pending"  # e.g. "republish" is advice only, never executed
+            service = self._service(kind, force_dry_run)
+            if service is None:
                 return "not_pending"
             if not self.database.set_engine_proposal_status(proposal_id, "approved"):
                 return "not_pending"
             sku = str(proposal["sku"])
-            service = self._service(force_dry_run)
             confirm_started = False
             try:
                 offers = self.ebay.list_offers(sku)
@@ -204,15 +220,20 @@ class Engine:
                     return self._finish(proposal_id, "failed",
                                         f"Expected exactly one published Offer for this SKU, found {len(published)}.")
                 offer_id = published[0]["offerId"]
+                field = "new_price" if kind == "price" else "new_quantity"
                 review = service.prepare_review(
-                    {"offer_id": [offer_id], "sku": [sku], "new_price": [str(proposal["proposed_value"])]},
+                    {"offer_id": [offer_id], "sku": [sku], field: [str(proposal["proposed_value"])]},
                     ENGINE_SESSION_ID,
                 )
-                if Decimal(review.expected_price) != Decimal(str(proposal["current_value"])):
+                if kind == "price":
+                    live, expected = Decimal(review.expected_price), Decimal(str(proposal["current_value"]))
+                else:
+                    live, expected = int(review.expected_quantity), int(str(proposal["current_value"]))
+                if live != expected:
                     service.cancel(review.action_token, ENGINE_SESSION_ID)
                     return self._finish(proposal_id, "superseded",
-                                        f"Live price is now {review.expected_price}, not "
-                                        f"{proposal['current_value']}; nothing changed. A fresh proposal will follow.")
+                                        f"Live {kind} is now {live}, not {proposal['current_value']}; "
+                                        "nothing changed.")
                 confirm_started = True
                 action_id = service.confirm(review.action_token, ENGINE_SESSION_ID)
                 if action_id is None:
@@ -221,7 +242,8 @@ class Engine:
                 result = action.get("result") or {}
                 state = action.get("status")
                 if state == "succeeded":
-                    note = "DRY RUN -- no eBay change was made." if result.get("dry_run") else "Price changed on eBay."
+                    note = ("DRY RUN -- no eBay change was made." if result.get("dry_run")
+                            else f"{kind.capitalize()} changed on eBay.")
                     return self._finish(proposal_id, "executed", note, action_id)
                 if state == "failed":
                     return self._finish(proposal_id, "failed",
@@ -264,6 +286,54 @@ class Engine:
             if outcome in {"executed", "failed", "unknown", "superseded"}:
                 executed += 1
         return executed
+
+    # -- restock job --------------------------------------------------------
+
+    def run_restock(self) -> int:
+        """Turn each pending one-off restock instruction into ONE proposal.
+
+        The instruction is cleared as soon as its proposal exists (or when
+        nothing needs changing), so it is never re-applied: the engine cannot
+        see later sales, and re-applying an old stock figure would oversell.
+        """
+        pending = [SkuCost.from_row(r) for r in self.database.list_sku_costs() if r.get("stock_pending")]
+        if not pending:
+            self.database.set_engine_state(STATE_LAST_RESTOCK, str(int(self.now())))
+            return 0
+        live = {l.sku: l for l in self.listing_reader()}
+        auto_mode = self.config.engine_mode in {"auto-dry", "auto"}
+        created = 0
+        for cost in pending:
+            stock = cost.stock_quantity
+            listing = live.get(cost.sku)
+            if stock is None:
+                self.database.clear_stock_pending(cost.sku)
+                continue
+            if listing is None:
+                if stock > 0:
+                    self.database.record_engine_proposal(
+                        sku=cost.sku, kind="republish", current_value="not live",
+                        proposed_value=f"publish with quantity {stock}", currency=None,
+                        reason=(f"Restock instruction for {stock}, but this SKU has no live listing. "
+                                "Publish it with bulk_publish_listings.py; the engine never "
+                                "republishes by itself."),
+                        decision="queue", ttl_seconds=PROPOSAL_TTL_SECONDS,
+                    )
+                    created += 1
+            elif listing.available_quantity is None or listing.available_quantity != stock:
+                current = listing.available_quantity if listing.available_quantity is not None else 0
+                action = "Relist" if current == 0 and stock > 0 else "Set stock"
+                self.database.record_engine_proposal(
+                    sku=cost.sku, kind="quantity", current_value=str(current),
+                    proposed_value=str(stock), currency=None,
+                    reason=f"{action}: restock instruction says {stock}; listing shows {current}.",
+                    decision="auto" if auto_mode else "queue", ttl_seconds=PROPOSAL_TTL_SECONDS,
+                )
+                created += 1
+            self.database.clear_stock_pending(cost.sku)
+        self.database.set_engine_state(STATE_LAST_RESTOCK, str(int(self.now())))
+        self.logger.info("Engine restock run: %s instruction(s), %s proposal(s)", len(pending), created)
+        return created
 
     # -- reprice job --------------------------------------------------------
 
@@ -375,7 +445,7 @@ def listing_reader_from_service(listing_service) -> ListingReader:
 
     def read() -> Iterable[LiveListing]:
         summary = listing_service.retrieve()
-        return [LiveListing(l.sku, l.price_value, l.currency) for l in summary.listings]
+        return [LiveListing(l.sku, l.price_value, l.currency, l.available_quantity) for l in summary.listings]
 
     return read
 

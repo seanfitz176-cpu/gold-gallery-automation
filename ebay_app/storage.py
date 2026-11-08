@@ -488,6 +488,12 @@ class AppDatabase:
                     fee_percent TEXT NOT NULL,
                     margin_percent TEXT,
                     currency TEXT NOT NULL,
+                    -- A one-off restock instruction: "I now have N of this SKU".
+                    -- stock_pending=1 until the engine has turned it into a
+                    -- proposal once; it is never re-applied, because the engine
+                    -- cannot see later sales and re-applying would oversell.
+                    stock_quantity INTEGER,
+                    stock_pending INTEGER NOT NULL DEFAULT 0,
                     updated_at INTEGER NOT NULL
                 );
 
@@ -1573,6 +1579,7 @@ class AppDatabase:
         fee_percent: str,
         currency: str,
         margin_percent: Optional[str] = None,
+        stock_quantity: Optional[int] = None,
     ) -> None:
         """Create or replace one SKU's cost row. All values are pre-validated
         decimal strings (see ``engine_pricing.parse_cost_row``);
@@ -1582,24 +1589,30 @@ class AppDatabase:
             self._connection.execute(
                 """
                 INSERT INTO sku_costs
-                    (sku, item_cost, postage_cost, fee_percent, margin_percent, currency, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                     stock_quantity, stock_pending, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sku) DO UPDATE SET
                     item_cost = excluded.item_cost,
                     postage_cost = excluded.postage_cost,
                     fee_percent = excluded.fee_percent,
                     margin_percent = excluded.margin_percent,
                     currency = excluded.currency,
+                    stock_quantity = COALESCE(excluded.stock_quantity, sku_costs.stock_quantity),
+                    stock_pending = CASE WHEN excluded.stock_quantity IS NOT NULL THEN 1
+                                         ELSE sku_costs.stock_pending END,
                     updated_at = excluded.updated_at
                 """,
-                (sku, item_cost, postage_cost, fee_percent, margin_percent, currency, now),
+                (sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                 stock_quantity, 1 if stock_quantity is not None else 0, now),
             )
 
     def get_sku_cost(self, sku: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency, updated_at
+                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                       stock_quantity, stock_pending, updated_at
                 FROM sku_costs WHERE sku = ?
                 """,
                 (sku,),
@@ -1610,11 +1623,16 @@ class AppDatabase:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency, updated_at
+                SELECT sku, item_cost, postage_cost, fee_percent, margin_percent, currency,
+                       stock_quantity, stock_pending, updated_at
                 FROM sku_costs ORDER BY sku ASC
                 """
             ).fetchall()
             return tuple(dict(row) for row in rows)
+
+    def clear_stock_pending(self, sku: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("UPDATE sku_costs SET stock_pending = 0 WHERE sku = ?", (sku,))
 
     def delete_sku_cost(self, sku: str) -> bool:
         with self._lock, self._connection:

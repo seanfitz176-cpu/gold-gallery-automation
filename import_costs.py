@@ -11,6 +11,9 @@ CSV columns (header row, any order, case-insensitive):
   fee_percent    optional, default 0 (UK private sellers pay no selling fee)
   margin_percent optional; blank = use APP_ENGINE_DEFAULT_MARGIN_PERCENT if
                  set, otherwise this SKU is reported but never repriced
+  stock_quantity optional ONE-OFF restock instruction ("I now have N"). The
+                 engine proposes setting the listing to N once, then forgets
+                 it -- it cannot see later sales, so it never re-applies it.
 
 Usage:
     python3 import_costs.py costs.csv                # Sandbox (.env)
@@ -52,10 +55,11 @@ def main(argv: List[str]) -> int:
         if not rows:
             print("No valid rows to import.")
             return 1
-        print(f"\n{'SKU':<28} {'Item':>9} {'Post':>7} {'Fee%':>6} {'Margin%':>8} {'Break-even':>11}")
+        print(f"\n{'SKU':<28} {'Item':>9} {'Post':>7} {'Fee%':>6} {'Margin%':>8} {'Break-even':>11} {'Restock':>8}")
         for r in rows:
+            restock = "-" if r.stock_quantity is None else str(r.stock_quantity)
             print(f"{r.sku:<28} {r.item_cost:>9} {r.postage_cost:>7} {r.fee_percent:>6} "
-                  f"{str(r.margin_percent or '-'):>8} {break_even_price(r):>11}")
+                  f"{str(r.margin_percent or '-'):>8} {break_even_price(r):>11} {restock:>8}")
         try:
             confirm = input(f"\nType IMPORT {len(rows)} to save these costs: ").strip()
         except EOFError:
@@ -70,6 +74,7 @@ def main(argv: List[str]) -> int:
                 r.sku, item_cost=str(r.item_cost), postage_cost=str(r.postage_cost),
                 fee_percent=str(r.fee_percent), currency=r.currency,
                 margin_percent=str(r.margin_percent) if r.margin_percent is not None else None,
+                stock_quantity=r.stock_quantity,
             )
         database.set_engine_state("reprice_requested", "1")
         print(f"Saved {len(rows)} cost row(s). Existing rows for the same SKUs were replaced.")

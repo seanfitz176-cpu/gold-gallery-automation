@@ -96,6 +96,13 @@ class CostRowTests(unittest.TestCase):
         self.assertEqual((c.item_cost, c.postage_cost, c.fee_percent, c.margin_percent),
                          (D("10.00"), D("0.00"), D("0.00"), None))
 
+    def test_stock_quantity_is_an_optional_one_off_instruction(self):
+        c = parse_cost_row({"sku": "A", "item_cost": "10", "stock_quantity": "4"}, "GBP")
+        self.assertEqual((c.stock_quantity, c.stock_pending), (4, True))
+        for bad in ("-1", "1.5", "abc", "1234567"):
+            with self.subTest(bad=bad), self.assertRaises(CostRowError):
+                parse_cost_row({"sku": "A", "item_cost": "10", "stock_quantity": bad}, "GBP")
+
     def test_invalid_rows_are_rejected(self):
         for row in (
             {"sku": "", "item_cost": "1"},

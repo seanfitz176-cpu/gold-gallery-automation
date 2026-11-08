@@ -356,3 +356,111 @@ class EngineExecutionTests(EngineTestCase):
         self.assertEqual(engine.execute_proposal(self.proposal()["proposal_id"]), "failed")
         self.assertIn("PRICE_FLOOR_REQUIRED", self.proposal()["outcome"])
         self.assertEqual(ebay.changes, [])
+
+
+class FakeEbayWithQuantity(FakeEbayForExecution):
+    def __init__(self, quantity=0, **kwargs):
+        super().__init__(**kwargs)
+        self.quantity = quantity
+        self.quantity_changes = []
+
+    def get_offer(self, offer_id):
+        offer = super().get_offer(offer_id)
+        offer["availableQuantity"] = self.quantity
+        return offer
+
+    @staticmethod
+    def offer_quantity(offer):
+        q = offer.get("availableQuantity")
+        return q if isinstance(q, int) else None
+
+    def quantity_mutation_guard(self):
+        import contextlib
+        return contextlib.nullcontext()
+
+    def change_quantity(self, **kwargs):
+        self.quantity_changes.append(kwargs)
+        self.quantity = kwargs["new_quantity"]
+        return {"offer_id": kwargs["offer_id"], "sku": kwargs["sku"], "quantity": kwargs["new_quantity"]}
+
+
+class EngineRestockTests(EngineTestCase):
+    def setUp(self):
+        super().setUp()
+        from ebay_app.config import DRAFT_SCOPES
+
+        self.config = replace(self.config, feature_stage="quantities", scopes=DRAFT_SCOPES,
+                              runtime_mode="local", dry_run=False)
+        self.database.save_refresh_token("r", 9_999_999_999, "user", new_grant=True, granted_scopes=DRAFT_SCOPES)
+        self.database.mark_connection_verified(self.database.connection_generation(), "user")
+        self.listings = [LiveListing("A", "40.00", "GBP", 0)]
+
+    def make(self, ebay, **overrides):
+        from ebay_app.prices import PriceService
+        from ebay_app.quantities import QuantityService
+
+        config = replace(self.config, **overrides)
+        return Engine(config, self.database, self.reader, now=self.clock, ebay=ebay,
+                      price_service=PriceService(ebay, self.database, config),
+                      quantity_service=QuantityService(ebay, self.database, config))
+
+    def restock(self, sku, qty):
+        self.database.set_sku_cost(sku, item_cost="10.00", postage_cost="0.00", fee_percent="0.00",
+                                   currency="GBP", stock_quantity=qty)
+
+    def test_restock_instruction_becomes_one_relist_proposal_and_is_never_reapplied(self):
+        self.restock("A", 3)
+        engine = self.make(FakeEbayWithQuantity(quantity=0))
+        self.assertEqual(engine.run_restock(), 1)
+        pending = self.database.list_engine_proposals()
+        self.assertEqual([(p["kind"], p["current_value"], p["proposed_value"]) for p in pending],
+                         [("quantity", "0", "3")])
+        self.assertIn("Relist", pending[0]["reason"])
+        self.assertEqual(engine.run_restock(), 0)  # instruction consumed
+        # Re-importing costs WITHOUT a stock figure must not revive it.
+        self.database.set_sku_cost("A", item_cost="11.00", postage_cost="0.00", fee_percent="0.00", currency="GBP")
+        self.assertEqual(engine.run_restock(), 0)
+
+    def test_approving_a_relist_goes_through_quantity_service(self):
+        self.restock("A", 3)
+        ebay = FakeEbayWithQuantity(quantity=0)
+        engine = self.make(ebay)
+        engine.run_restock()
+        pid = self.database.list_engine_proposals()[0]["proposal_id"]
+        self.assertEqual(engine.execute_proposal(pid), "executed")
+        self.assertEqual(ebay.quantity_changes[0]["new_quantity"], 3)
+
+    def test_auto_mode_relists_automatically(self):
+        self.restock("A", 2)
+        ebay = FakeEbayWithQuantity(quantity=0)
+        self.make(ebay, engine_mode="auto").tick()
+        self.assertEqual([c["new_quantity"] for c in ebay.quantity_changes], [2])
+
+    def test_sold_since_proposal_supersedes_instead_of_overselling(self):
+        self.listings = [LiveListing("A", "40.00", "GBP", 1)]
+        self.restock("A", 3)
+        ebay = FakeEbayWithQuantity(quantity=1)
+        engine = self.make(ebay)
+        engine.run_restock()
+        ebay.quantity = 0  # it sold in the meantime
+        pid = self.database.list_engine_proposals()[0]["proposal_id"]
+        self.assertEqual(engine.execute_proposal(pid), "superseded")
+        self.assertEqual(ebay.quantity_changes, [])
+
+    def test_no_live_listing_gives_advice_only_never_executed(self):
+        self.listings = []
+        self.restock("A", 2)
+        engine = self.make(FakeEbayWithQuantity())
+        engine.run_restock()
+        proposal = self.database.list_engine_proposals()[0]
+        self.assertEqual((proposal["kind"], proposal["decision"]), ("republish", "queue"))
+        self.assertEqual(engine.execute_proposal(proposal["proposal_id"]), "not_pending")
+
+    def test_quantity_changes_are_refused_outside_the_quantities_stage(self):
+        self.restock("A", 3)
+        ebay = FakeEbayWithQuantity(quantity=0)
+        engine = self.make(ebay, feature_stage="prices")
+        engine.run_restock()
+        pid = self.database.list_engine_proposals()[0]["proposal_id"]
+        self.assertEqual(engine.execute_proposal(pid), "failed")
+        self.assertIn("QUANTITY_STAGE_LOCKED", self.database.get_engine_proposal(pid)["outcome"])

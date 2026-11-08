@@ -67,6 +67,8 @@ class SkuCost:
     fee_percent: Decimal
     margin_percent: Optional[Decimal]
     currency: str
+    stock_quantity: Optional[int] = None
+    stock_pending: bool = False
 
     @property
     def total_cost(self) -> Decimal:
@@ -82,6 +84,8 @@ class SkuCost:
             fee_percent=Decimal(str(row["fee_percent"])),
             margin_percent=Decimal(str(margin)) if margin not in (None, "") else None,
             currency=str(row["currency"]),
+            stock_quantity=int(row["stock_quantity"]) if row.get("stock_quantity") is not None else None,
+            stock_pending=bool(row.get("stock_pending")),
         )
 
 
@@ -100,7 +104,13 @@ def parse_cost_row(raw: Mapping[str, str], currency: str) -> SkuCost:
     margin = _percent(margin_raw, "margin_percent", MAX_MARGIN_PERCENT) if margin_raw else None
     if item_cost + postage_cost <= 0:
         raise CostRowError("item_cost + postage_cost must be greater than 0")
-    return SkuCost(sku, item_cost, postage_cost, fee, margin, currency)
+    stock_raw = (raw.get("stock_quantity") or "").strip()
+    stock: Optional[int] = None
+    if stock_raw:
+        if not stock_raw.isdigit() or len(stock_raw) > 6:
+            raise CostRowError("stock_quantity must be a whole number from 0 to 999999")
+        stock = int(stock_raw)
+    return SkuCost(sku, item_cost, postage_cost, fee, margin, currency, stock, stock is not None)
 
 
 def load_cost_csv(path: Path, currency: str) -> Tuple[List[SkuCost], List[Tuple[int, str, str]]]:

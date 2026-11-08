@@ -90,6 +90,7 @@ def main(argv=None) -> int:
             engine = Engine(
                 config, database, listing_reader_from_service(application.listing_service),
                 ebay=ebay, price_service=application.price_service,
+                quantity_service=application.quantity_service,
             )
             application.engine = engine
             engine_thread = EngineThread(engine)

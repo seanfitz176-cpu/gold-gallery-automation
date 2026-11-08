@@ -64,7 +64,7 @@ In an interactive session, Esc interrupts immediately.
 - [x] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause, auto-pause after 3 errors
 - [x] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
 - [x] Approval queue (Approve/Reject on `/engine`) executing through the existing `PriceService` with a fixed engine session; auto-dry/auto run in-limit proposals; unknown outcome pauses the engine
-- [ ] Relist/restock job (quantity restore; ended listings queue a republish proposal only)
+- [x] Relist/restock job: one-off restock instructions via `stock_quantity` in the cost CSV, quantity proposals through `QuantityService`, advice-only republish proposals, sold-since-proposal → superseded
 - [ ] Email alerts via smtplib (immediate on unknown/pause/token failure; 6-hourly digest)
 - [ ] Order watch and health check jobs (alerts only)
 

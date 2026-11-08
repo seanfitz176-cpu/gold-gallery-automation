@@ -74,7 +74,7 @@ Jobs only **propose** actions. Nothing is executed inside a job.
 ## 6. Modes, pause and kill switches
 `APP_ENGINE_MODE` has four modes, rolled out in this order:
 1. `off`: the default, and today's behaviour.
-2. `shadow`: jobs run and every proposal is queued. Nothing executes.
+2. `shadow`: jobs run and every proposal is queued. Nothing executes unless you approve it on `/engine`.
 3. `auto-dry`: in-limit proposals "execute" with dry run forced on.
 4. `auto`: in-limit proposals execute for real, still bound by
    `APP_DRY_RUN` and `APP_MAX_ACTIONS_PER_RUN`. It starts with a budget of 1.

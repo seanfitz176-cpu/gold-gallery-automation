@@ -510,6 +510,8 @@ class AppDatabase:
                         'pending', 'approved', 'rejected', 'executed',
                         'expired', 'failed', 'unknown', 'superseded'
                     )),
+                    outcome TEXT,
+                    action_id TEXT,
                     created_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -1687,7 +1689,7 @@ class AppDatabase:
             rows = self._connection.execute(
                 f"""
                 SELECT proposal_id, sku, kind, current_value, proposed_value, currency, reason,
-                       decision, status, created_at, expires_at, updated_at
+                       decision, status, outcome, action_id, created_at, expires_at, updated_at
                 FROM engine_proposals WHERE status IN ({placeholders})
                 ORDER BY created_at DESC, proposal_id DESC LIMIT ?
                 """,
@@ -1695,13 +1697,38 @@ class AppDatabase:
             ).fetchall()
             return tuple(dict(row) for row in rows)
 
-    def set_engine_proposal_status(self, proposal_id: int, status: str, *, expected: str = "pending") -> bool:
+    def get_engine_proposal(self, proposal_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT proposal_id, sku, kind, current_value, proposed_value, currency, reason,
+                       decision, status, outcome, action_id, created_at, expires_at, updated_at
+                FROM engine_proposals WHERE proposal_id = ?
+                """,
+                (int(proposal_id),),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def set_engine_proposal_status(
+        self,
+        proposal_id: int,
+        status: str,
+        *,
+        expected: str = "pending",
+        outcome: Optional[str] = None,
+        action_id: Optional[str] = None,
+    ) -> bool:
         """Compare-and-set, so a proposal can never be acted on twice."""
         now = int(self._now())
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                "UPDATE engine_proposals SET status = ?, updated_at = ? WHERE proposal_id = ? AND status = ?",
-                (status, now, int(proposal_id), expected),
+                """
+                UPDATE engine_proposals
+                SET status = ?, updated_at = ?,
+                    outcome = COALESCE(?, outcome), action_id = COALESCE(?, action_id)
+                WHERE proposal_id = ? AND status = ?
+                """,
+                (status, now, outcome[:500] if outcome else None, action_id, int(proposal_id), expected),
             )
             return cursor.rowcount == 1
 

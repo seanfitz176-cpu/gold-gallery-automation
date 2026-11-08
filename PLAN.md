@@ -1,5 +1,24 @@
 # Build plan for autonomous Claude sessions
 
+## One goal, two layers
+The project goal is an eBay seller account that runs itself, with you making
+only the high-level decisions. Both halves of this repository serve that goal
+and follow the same oversight model: **act autonomously inside limits you
+set, stop at checkpoints for your approval, and let you override at any
+time.**
+
+| | Layer 1: Claude building the app | Layer 2: the app running the account |
+|---|---|---|
+| Works autonomously | through `PLAN.md` (Stop hook keeps it going) | engine jobs reprice and relist (`ebay_app/engine.py`) |
+| Hard limits | gate hook: no secrets, no live eBay calls, no push to `main` | price floor, max change %, actions per run, `APP_DRY_RUN` |
+| Your checkpoints | `.claude/checkpoints/phase-N.md` + `ctl.py approve N` | approval queue on `/engine` + modes off → shadow → auto-dry → auto |
+| Override any time | `ctl.py stop` / Esc | **Pause engine** button, auto-pause on uncertainty, stop the app |
+| Record | git history + checkpoint notes | encrypted action journal + audit export |
+
+Layer 1 never touches your real eBay account. Every live eBay run is yours.
+Layer 2 can only change listings through the same already-gated services
+that every manual change uses.
+
 Claude works through this file top to bottom. The Stop hook
 (`.claude/hooks/stop_gate.py`) keeps it working until every task in the
 current phase is ticked. It then writes `.claude/checkpoints/phase-N.md` and
@@ -44,7 +63,7 @@ In an interactive session, Esc interrupts immediately.
 - [x] Dashboard page listing costs, implied current margin, target and proposal per SKU (read-only `/engine` page)
 - [x] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause, auto-pause after 3 errors
 - [x] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
-- [ ] `/queue` approval page executing through the existing services with a fixed engine session
+- [x] Approval queue (Approve/Reject on `/engine`) executing through the existing `PriceService` with a fixed engine session; auto-dry/auto run in-limit proposals; unknown outcome pauses the engine
 - [ ] Relist/restock job (quantity restore; ended listings queue a republish proposal only)
 - [ ] Email alerts via smtplib (immediate on unknown/pause/token failure; 6-hourly digest)
 - [ ] Order watch and health check jobs (alerts only)

@@ -1,11 +1,13 @@
 """Autonomy engine core (docs/autonomy_engine.md).
 
 Runs as ONE background thread inside the existing app process, because
-``AppDatabase`` holds an exclusive process lock. Jobs only PROPOSE changes;
-nothing in this module writes to eBay. Execution of approved/auto proposals
-through the existing, already-gated services is a later step -- until it
-exists, every mode behaves as ``shadow`` for execution purposes, and the
-status says so plainly.
+``AppDatabase`` holds an exclusive process lock. Jobs only PROPOSE changes.
+A proposal is executed only (a) when the owner approves it on /engine, or
+(b) automatically in ``auto-dry``/``auto`` mode when it was routed ``auto``
+(inside every limit). Execution never talks to eBay directly: it goes
+through ``PriceService.prepare_review`` -> ``confirm`` -- the same journaled,
+drift-checked, floor/cap/budget-limited, dry-run-aware path as a manual
+change. ``auto-dry`` forces dry run regardless of APP_DRY_RUN.
 
 Safety properties:
 - ``off`` (the default) does nothing at all.
@@ -24,9 +26,15 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
+from dataclasses import replace
+
 from .config import AppConfig
+from .ebay_client import EbayError
 from .engine_pricing import SkuCost, decide_reprice
 from .storage import AppDatabase
+from .validation import ValidationError
+
+ENGINE_SESSION_ID = "autonomy-engine"
 
 PROPOSAL_TTL_SECONDS = 24 * 3600
 MAX_REPORT_ROWS = 2000
@@ -58,12 +66,20 @@ class Engine:
         *,
         now: Callable[[], float] = time.time,
         logger: Optional[logging.Logger] = None,
+        ebay=None,
+        price_service=None,
     ) -> None:
         self.config = config
         self.database = database
         self.listing_reader = listing_reader
         self.now = now
         self.logger = logger or logging.getLogger("ebay_engine")
+        self.ebay = ebay
+        # The app's own PriceService, shared so there is ONE actions-per-run
+        # budget for manual and engine changes together.
+        self.price_service = price_service
+        self._dry_run_service = None
+        self._execute_lock = threading.Lock()
 
     # -- pause / status ---------------------------------------------------
 
@@ -83,9 +99,8 @@ class Engine:
         self.database.set_engine_state(STATE_REPRICE_REQUESTED, "1")
 
     def executes(self) -> bool:
-        """Whether this build can execute proposals. Execution through the
-        existing services is not built yet, so this is always False."""
-        return False
+        """Whether proposals can be executed (approved or auto)."""
+        return self.ebay is not None and self.price_service is not None
 
     def status(self) -> Dict[str, object]:
         report_raw = self.database.get_engine_state(STATE_REPORT)
@@ -125,9 +140,11 @@ class Engine:
         if self.paused_reason():
             return
         if not self._reprice_due():
+            self.run_auto()
             return
         try:
             self.run_reprice()
+            self.run_auto()
         except Exception as error:  # noqa: BLE001 - recorded, counted, never re-raised
             count = int(self.database.get_engine_state(STATE_ERRORS) or "0") + 1
             self.database.set_engine_state(STATE_ERRORS, str(count))
@@ -137,6 +154,116 @@ class Engine:
                            f"(last: {type(error).__name__}: {error})")
             return
         self.database.set_engine_state(STATE_ERRORS, "0")
+
+    # -- execution ------------------------------------------------------------
+
+    def _service(self, force_dry_run: bool):
+        if not force_dry_run:
+            return self.price_service
+        if self._dry_run_service is None:
+            from .prices import PriceService
+
+            self._dry_run_service = PriceService(self.ebay, self.database, replace(self.config, dry_run=True))
+        return self._dry_run_service
+
+    def _finish(self, proposal_id: int, status: str, outcome: str, action_id: Optional[str] = None) -> str:
+        self.database.set_engine_proposal_status(
+            proposal_id, status, expected="approved", outcome=outcome, action_id=action_id
+        )
+        if status == "unknown":
+            self.pause(f"Paused automatically: the outcome of proposal {proposal_id} is unknown "
+                       "-- check the listing in Seller Hub before resuming")
+        return status
+
+    def execute_proposal(self, proposal_id: int, *, force_dry_run: bool = False) -> str:
+        """Execute one pending price proposal through PriceService.
+
+        Returns the proposal's final status, or "not_pending" (nothing done),
+        or "budget" (actions-per-run budget reached; proposal left pending).
+        """
+        if not self.executes():
+            return "not_pending"
+        with self._execute_lock:
+            proposal = self.database.get_engine_proposal(proposal_id)
+            if proposal is None or proposal["status"] != "pending":
+                return "not_pending"
+            if proposal["expires_at"] <= self.now():
+                self.database.set_engine_proposal_status(proposal_id, "expired", outcome="Expired before execution.")
+                return "expired"
+            if proposal["kind"] != "price":
+                return "not_pending"
+            if not self.database.set_engine_proposal_status(proposal_id, "approved"):
+                return "not_pending"
+            sku = str(proposal["sku"])
+            service = self._service(force_dry_run)
+            confirm_started = False
+            try:
+                offers = self.ebay.list_offers(sku)
+                published = [o for o in offers if o.get("status") == "PUBLISHED"]
+                if len(published) != 1 or not isinstance(published[0].get("offerId"), str):
+                    return self._finish(proposal_id, "failed",
+                                        f"Expected exactly one published Offer for this SKU, found {len(published)}.")
+                offer_id = published[0]["offerId"]
+                review = service.prepare_review(
+                    {"offer_id": [offer_id], "sku": [sku], "new_price": [str(proposal["proposed_value"])]},
+                    ENGINE_SESSION_ID,
+                )
+                if Decimal(review.expected_price) != Decimal(str(proposal["current_value"])):
+                    service.cancel(review.action_token, ENGINE_SESSION_ID)
+                    return self._finish(proposal_id, "superseded",
+                                        f"Live price is now {review.expected_price}, not "
+                                        f"{proposal['current_value']}; nothing changed. A fresh proposal will follow.")
+                confirm_started = True
+                action_id = service.confirm(review.action_token, ENGINE_SESSION_ID)
+                if action_id is None:
+                    return self._finish(proposal_id, "failed", "The confirmation could not be claimed; nothing changed.")
+                action = self.database.get_action_for_admin(action_id) or {}
+                result = action.get("result") or {}
+                state = action.get("status")
+                if state == "succeeded":
+                    note = "DRY RUN -- no eBay change was made." if result.get("dry_run") else "Price changed on eBay."
+                    return self._finish(proposal_id, "executed", note, action_id)
+                if state == "failed":
+                    return self._finish(proposal_id, "failed",
+                                        f"eBay rejected the change: {action.get('error_message') or 'see audit log'}",
+                                        action_id)
+                return self._finish(proposal_id, "unknown",
+                                    "The outcome could not be confirmed -- check the listing in Seller Hub.", action_id)
+            except EbayError as error:
+                if error.code == "MAX_ACTIONS_PER_RUN_REACHED" and not confirm_started:
+                    self.database.set_engine_proposal_status(
+                        proposal_id, "pending", expected="approved",
+                        outcome="Waiting: this run's actions budget is used up (restart the app to reset).")
+                    return "budget"
+                if confirm_started and error.outcome_unknown:
+                    return self._finish(proposal_id, "unknown", f"{error.code}: {error}")
+                return self._finish(proposal_id, "failed", f"{error.code}: {error}")
+            except ValidationError as error:
+                return self._finish(proposal_id, "failed", "; ".join(error.errors.values()))
+            except Exception as error:  # noqa: BLE001
+                if confirm_started:
+                    return self._finish(proposal_id, "unknown", f"Unexpected error after confirming: {type(error).__name__}")
+                return self._finish(proposal_id, "failed", f"Unexpected error before any change: {type(error).__name__}")
+
+    def run_auto(self) -> int:
+        """Execute pending ``auto`` proposals in auto-dry/auto mode only."""
+        if self.config.engine_mode not in {"auto-dry", "auto"} or not self.executes():
+            return 0
+        executed = 0
+        pending = sorted(
+            (p for p in self.database.list_engine_proposals(("pending",)) if p["decision"] == "auto"),
+            key=lambda p: (p["created_at"], p["proposal_id"]),
+        )
+        for proposal in pending:
+            if self.paused_reason():
+                break
+            outcome = self.execute_proposal(proposal["proposal_id"],
+                                            force_dry_run=self.config.engine_mode == "auto-dry")
+            if outcome == "budget":
+                break
+            if outcome in {"executed", "failed", "unknown", "superseded"}:
+                executed += 1
+        return executed
 
     # -- reprice job --------------------------------------------------------
 
@@ -262,5 +389,12 @@ def describe(status: Dict[str, object]) -> Tuple[str, str]:
         return "Engine PAUSED", str(status["paused_reason"])
     if not status.get("executes"):
         return (f"Engine running ({mode}) -- proposals only",
-                "Nothing is executed yet: approving or auto-running proposals is a later build step.")
-    return f"Engine running ({mode})", ""
+                "Execution is unavailable in this configuration.")
+    if mode == "shadow":
+        return ("Engine running (shadow)",
+                "Proposals are only queued; nothing runs unless you approve it.")
+    if mode == "auto-dry":
+        return ("Engine running (auto-dry)",
+                "In-limit proposals run automatically as DRY RUNS -- no eBay change is made.")
+    return ("Engine running (AUTO)",
+            "In-limit proposals change real prices, bound by APP_DRY_RUN and the actions budget.")

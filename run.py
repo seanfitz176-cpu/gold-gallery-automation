@@ -87,7 +87,10 @@ def main(argv=None) -> int:
             logging.exception("Unexpected error during the account-deletion startup poll")
         application = WebApplication(config, database, ebay)
         if config.engine_mode != "off":
-            engine = Engine(config, database, listing_reader_from_service(application.listing_service))
+            engine = Engine(
+                config, database, listing_reader_from_service(application.listing_service),
+                ebay=ebay, price_service=application.price_service,
+            )
             application.engine = engine
             engine_thread = EngineThread(engine)
             engine_thread.start()

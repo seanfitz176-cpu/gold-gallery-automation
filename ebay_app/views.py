@@ -1439,12 +1439,28 @@ def engine_page(
         for r in rows
     ) or '<tr><td colspan="9">No report yet. The first run happens on the next engine tick.</td></tr>'
     generated = report.get("generated_at")
+    def _proposal_buttons(p):
+        pid = h(str(p["proposal_id"]))
+        return (
+            f'<form method="post" action="/engine/approve" class="inline">'
+            f'<input type="hidden" name="csrf_token" value="{h(csrf_token)}">'
+            f'<input type="hidden" name="proposal_id" value="{pid}">'
+            f'<button type="submit">Approve</button></form> '
+            f'<form method="post" action="/engine/reject" class="inline">'
+            f'<input type="hidden" name="csrf_token" value="{h(csrf_token)}">'
+            f'<input type="hidden" name="proposal_id" value="{pid}">'
+            f'<button type="submit" class="secondary">Reject</button></form>'
+        )
+
+    executes = bool(status.get("executes"))
     pending_html = "".join(
         f"<tr><td><code>{h(p['sku'])}</code></td><td>{h(p['kind'])}</td>"
-        f"<td>{h(p.get('currency') or '')} {h(p['current_value'])} → {h(p['proposed_value'])}</td>"
-        f"<td>{h(p['decision'])}</td><td>{h(p['reason'])}</td></tr>"
+        f"<td>{h(p.get('currency') or '')} {h(p['current_value'])} &rarr; {h(p['proposed_value'])}</td>"
+        f"<td>{h(p['decision'])}</td><td>{h(p['reason'])}"
+        f"{('<br><em>' + h(p['outcome']) + '</em>') if p.get('outcome') else ''}</td>"
+        f"<td>{_proposal_buttons(p) if executes else ''}</td></tr>"
         for p in pending
-    ) or '<tr><td colspan="5">No pending proposals.</td></tr>'
+    ) or '<tr><td colspan="6">No pending proposals.</td></tr>'
     body = f"""<div class="notice {kind}"><strong>{h(headline)}</strong> {h(detail)}</div>
     <section class="card">{settings}{controls}</section>
     <section class="card"><h2>Last price check</h2>
@@ -1453,7 +1469,7 @@ def engine_page(
     <th>Current margin</th><th>Target margin</th><th>Target</th><th>Proposed</th><th>Status</th><th>Why</th></tr></thead>
     <tbody>{row_html}</tbody></table></div></section>
     <section class="card"><h2>Pending proposals</h2>
-    <p>Nothing here is executed yet. Approving proposals arrives in a later build step.</p>
-    <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Kind</th><th>Change</th><th>Route</th><th>Why</th></tr></thead>
+    <p>{h('Approve runs the change through the normal price-change checks (floor, max change, actions budget, live-price re-check, dry-run switch). Proposals expire after 24 hours.' if executes else 'Execution is unavailable in this configuration.')}</p>
+    <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Kind</th><th>Change</th><th>Route</th><th>Why</th><th></th></tr></thead>
     <tbody>{pending_html}</tbody></table></div></section>"""
     return layout(f"Autonomy engine ({environment})", body, authenticated=True, csrf_token=csrf_token, flashes=flashes)

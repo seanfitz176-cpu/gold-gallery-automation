@@ -73,7 +73,8 @@ from .views import (
     engine_page,
 )
 
-ENGINE_ROUTES = frozenset({"/engine", "/engine/pause", "/engine/resume", "/engine/run"})
+ENGINE_ROUTES = frozenset({"/engine", "/engine/pause", "/engine/resume", "/engine/run",
+                           "/engine/approve", "/engine/reject"})
 
 
 class RequestError(ValueError):
@@ -754,6 +755,32 @@ class WebApplication:
                 self.config.environment.capitalize(),
                 flashes,
             ))
+        if engine_route and request.method == "POST" and request.path in {"/engine/approve", "/engine/reject"}:
+            self._check_csrf(request, session)
+            raw_id = Request.one(request.form, "proposal_id").strip()
+            if not raw_id.isdigit() or len(raw_id) > 12:
+                raise RequestError("Proposal not found", 404)
+            proposal_id = int(raw_id)
+            if request.path == "/engine/reject":
+                if self.database.set_engine_proposal_status(proposal_id, "rejected", outcome="Rejected by the owner."):
+                    session.flashes.append(("info", f"Proposal {proposal_id} rejected; nothing changed."))
+                else:
+                    session.flashes.append(("warning", f"Proposal {proposal_id} is no longer pending."))
+                return Response.redirect("/engine")
+            if self.engine.paused_reason():
+                session.flashes.append(("warning", "Resume the engine before approving proposals."))
+                return Response.redirect("/engine")
+            outcome = self.engine.execute_proposal(
+                proposal_id, force_dry_run=self.config.engine_mode == "auto-dry"
+            )
+            record = self.database.get_engine_proposal(proposal_id) or {}
+            kind = {"executed": "success", "budget": "warning", "superseded": "info"}.get(outcome, "error")
+            if outcome == "not_pending":
+                message = f"Proposal {proposal_id} is no longer pending, or execution is unavailable."
+            else:
+                message = f"Proposal {proposal_id}: {outcome}. {record.get('outcome') or ''}".strip()
+            session.flashes.append((kind, message))
+            return Response.redirect("/engine")
         if engine_route and request.method == "POST" and request.path in {"/engine/pause", "/engine/resume", "/engine/run"}:
             self._check_csrf(request, session)
             if request.path == "/engine/pause":

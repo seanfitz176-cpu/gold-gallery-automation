@@ -194,6 +194,21 @@ class EngineWebTests(unittest.TestCase):
         self.assertNotEqual(status, 303)
         self.assertIsNone(self.engine.paused_reason())
 
+    def test_reject_marks_a_proposal_without_any_change(self):
+        pid = self.helper.database.record_engine_proposal(
+            sku="A", kind="price", current_value="40.00", proposed_value="44.00", currency="GBP",
+            reason="test", decision="queue", ttl_seconds=3600)
+        cookie = self.helper.login()
+        _s, _h, page = self.helper.request("GET", "/engine", cookie=cookie)
+        csrf = self.helper.hidden(page, "csrf_token")
+        status, _h, _b = self.helper.request("POST", "/engine/reject", cookie=cookie,
+                                             form={"csrf_token": csrf, "proposal_id": str(pid)})
+        self.assertEqual(status, 303)
+        self.assertEqual(self.helper.database.get_engine_proposal(pid)["status"], "rejected")
+        status, _h, _b = self.helper.request("POST", "/engine/approve", cookie=cookie,
+                                             form={"csrf_token": csrf, "proposal_id": "abc"})
+        self.assertEqual(status, 404)
+
     def test_engine_routes_are_locked_when_the_engine_is_off(self):
         from ebay_app.web import WebApplication
 
@@ -209,3 +224,135 @@ class EngineWebTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeEbayForExecution:
+    """Just enough of EbaySandboxClient for PriceService + the engine."""
+
+    def __init__(self, price="40.00", offers=None, change_error=None):
+        self.price = price
+        self.offers = offers
+        self.change_error = change_error
+        self.changes = []
+
+    def list_offers(self, sku):
+        if self.offers is not None:
+            return self.offers
+        return [{"offerId": "O1", "sku": sku, "status": "PUBLISHED"}]
+
+    def get_offer(self, offer_id):
+        return {"offerId": offer_id, "sku": "A", "status": "PUBLISHED",
+                "pricingSummary": {"price": {"value": self.price, "currency": "GBP"}}}
+
+    @staticmethod
+    def offer_price(offer):
+        price = offer.get("pricingSummary", {}).get("price", {})
+        return {"value": str(price.get("value", "")), "currency": str(price.get("currency", ""))}
+
+    def price_mutation_guard(self):
+        import contextlib
+        return contextlib.nullcontext()
+
+    def change_price(self, **kwargs):
+        if self.change_error is not None:
+            raise self.change_error
+        self.changes.append(kwargs)
+        self.price = kwargs["new_price"]
+        return {"offer_id": kwargs["offer_id"], "sku": kwargs["sku"],
+                "price": kwargs["new_price"], "currency": kwargs["currency"]}
+
+
+class EngineExecutionTests(EngineTestCase):
+    def setUp(self):
+        super().setUp()
+        from ebay_app.config import DRAFT_SCOPES
+
+        self.config = replace(self.config, feature_stage="prices", scopes=DRAFT_SCOPES,
+                              runtime_mode="local", dry_run=False, max_actions_per_run=10)
+        self.database.save_refresh_token("r", 9_999_999_999, "user", new_grant=True, granted_scopes=DRAFT_SCOPES)
+        self.database.mark_connection_verified(self.database.connection_generation(), "user")
+        self.listings = [LiveListing("A", "40.00", "GBP")]
+        self.cost("A", margin="30")  # proposes 40.00 -> 44.00
+
+    def make(self, ebay=None, **overrides):
+        from ebay_app.prices import PriceService
+
+        config = replace(self.config, **overrides)
+        ebay = ebay or FakeEbayForExecution()
+        engine = Engine(config, self.database, self.reader, now=self.clock,
+                        ebay=ebay, price_service=PriceService(ebay, self.database, config))
+        return engine, ebay
+
+    def proposal(self):
+        return self.database.list_engine_proposals(
+            ("pending", "executed", "failed", "unknown", "superseded", "approved"))[0]
+
+    def test_shadow_never_executes_automatically_but_approval_does(self):
+        engine, ebay = self.make()
+        engine.tick()
+        self.assertEqual(ebay.changes, [])
+        self.assertEqual(engine.execute_proposal(self.proposal()["proposal_id"]), "executed")
+        self.assertEqual(ebay.changes[0]["new_price"], "44.00")
+        record = self.proposal()
+        self.assertEqual(record["status"], "executed")
+        self.assertIsNotNone(record["action_id"])
+        self.assertEqual(engine.execute_proposal(record["proposal_id"]), "not_pending")  # never twice
+
+    def test_auto_dry_runs_in_limit_proposals_as_dry_runs_only(self):
+        engine, ebay = self.make(engine_mode="auto-dry")
+        engine.tick()
+        self.assertEqual(ebay.changes, [])
+        record = self.proposal()
+        self.assertEqual(record["status"], "executed")
+        self.assertIn("DRY RUN", record["outcome"])
+
+    def test_auto_executes_for_real_and_respects_app_dry_run(self):
+        engine, ebay = self.make(engine_mode="auto")
+        engine.tick()
+        self.assertEqual(len(ebay.changes), 1)
+        self.database.delete_engine_state("last_reprice_at")
+        ebay2 = FakeEbayForExecution(price="44.00")
+        self.listings = [LiveListing("A", "44.00", "GBP")]
+        engine2, _ = self.make(ebay=ebay2, engine_mode="auto", dry_run=True)
+        engine2.tick()
+        self.assertEqual(ebay2.changes, [])
+        self.assertIn("DRY RUN", self.proposal()["outcome"])
+
+    def test_live_price_drift_supersedes_without_changing_anything(self):
+        engine, ebay = self.make()
+        engine.run_reprice()
+        ebay.price = "41.00"
+        self.assertEqual(engine.execute_proposal(self.proposal()["proposal_id"]), "superseded")
+        self.assertEqual(ebay.changes, [])
+
+    def test_ambiguous_offers_fail_cleanly(self):
+        engine, ebay = self.make(ebay=FakeEbayForExecution(offers=[]))
+        engine.run_reprice()
+        self.assertEqual(engine.execute_proposal(self.proposal()["proposal_id"]), "failed")
+        self.assertIn("exactly one published Offer", self.proposal()["outcome"])
+
+    def test_unknown_outcome_pauses_the_engine(self):
+        from ebay_app.ebay_client import EbayError
+
+        engine, ebay = self.make(ebay=FakeEbayForExecution(
+            change_error=EbayError("lost", code="EBAY_CONNECTION_ERROR", outcome_unknown=True)))
+        engine.run_reprice()
+        self.assertEqual(engine.execute_proposal(self.proposal()["proposal_id"]), "unknown")
+        self.assertIn("unknown", engine.paused_reason())
+
+    def test_budget_leaves_the_proposal_pending(self):
+        engine, ebay = self.make(engine_mode="auto", max_actions_per_run=1)
+        engine.price_service._actions_this_run = 1
+        engine.tick()
+        record = self.proposal()
+        self.assertEqual(record["status"], "pending")
+        self.assertIn("budget", record["outcome"])
+        self.assertEqual(ebay.changes, [])
+
+    def test_floor_and_cap_still_enforced_by_price_service(self):
+        engine, ebay = self.make()
+        self.database.delete_price_limit("A")  # floors required -> PriceService refuses
+        engine.run_reprice()
+        self.assertEqual(engine.execute_proposal(self.proposal()["proposal_id"]), "failed")
+        self.assertIn("PRICE_FLOOR_REQUIRED", self.proposal()["outcome"])
+        self.assertEqual(ebay.changes, [])

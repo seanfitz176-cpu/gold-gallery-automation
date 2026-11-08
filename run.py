@@ -21,6 +21,7 @@ from ebay_app.engine import (
     EngineThread,
     describe,
     listing_reader_from_service,
+    market_reader_from_client,
     order_reader_from_service,
 )
 from ebay_app.alerts import Notifier
@@ -99,6 +100,7 @@ def main(argv=None) -> int:
                 ebay=ebay, price_service=application.price_service,
                 quantity_service=application.quantity_service,
                 notifier=Notifier(config),
+                market_reader=market_reader_from_client(ebay),
                 # Order watch only where the stage grants order permission;
                 # elsewhere it would just trip the permission health check.
                 order_reader=(

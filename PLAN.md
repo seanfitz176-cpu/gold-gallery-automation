@@ -70,6 +70,9 @@ In an interactive session, Esc interrupts immediately.
 
 - CHECKPOINT: owner reviews, then tries shadow mode in Sandbox with a cost CSV
 
+## Extra — Market check for margins
+- [x] Read-only Browse API comparison (`APP_ENGINE_MARKET_CHECK`, off by default); targets >25% above the market median always queue; refusal is reported, never an engine error
+
 ## Phase 5 — Second seller account
 Owner's choice: one separate copy of the app per account.
 - [x] Allow exactly one extra port (5001), only with `APP_ACCOUNT_LABEL` set; Host header bound to the configured port

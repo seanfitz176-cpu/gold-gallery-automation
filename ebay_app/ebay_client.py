@@ -1673,6 +1673,51 @@ class EbaySandboxClient:
         aspects = response.get("aspects")
         return list(aspects) if isinstance(aspects, list) else []
 
+    def search_comparable_listings(
+        self,
+        query: str,
+        *,
+        exclude_listing_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Decimal]:
+        """Read-only market check: prices of live fixed-price listings matching
+        ``query`` on this marketplace, in this account's currency, excluding
+        the seller's own listing. Uses the Browse API with the application
+        token (no user data). eBay may require Buy API approval for this in
+        production; a refusal surfaces as a normal EbayError for the caller
+        to treat as "market check unavailable"."""
+
+        text = " ".join(str(query).split())[:100]
+        if not text:
+            return []
+        response = self._api_request(
+            "GET",
+            "/buy/browse/v1/item_summary/search",
+            query={
+                "q": text,
+                "limit": max(1, min(int(limit), 50)),
+                "filter": f"buyingOptions:{{FIXED_PRICE}},priceCurrency:{self.config.currency}",
+            },
+            safe_read=True,
+            access_token=self._get_application_access_token(),
+        )
+        prices: List[Decimal] = []
+        for item in response.get("itemSummaries") or []:
+            if not isinstance(item, Mapping):
+                continue
+            if exclude_listing_id and str(item.get("legacyItemId") or "") == str(exclude_listing_id):
+                continue
+            price = item.get("price") if isinstance(item.get("price"), Mapping) else {}
+            if price.get("currency") != self.config.currency:
+                continue
+            try:
+                value = Decimal(str(price.get("value")))
+            except (InvalidOperation, TypeError):
+                continue
+            if value.is_finite() and value > 0:
+                prices.append(value)
+        return prices
+
     @contextmanager
     def draft_mutation_guard(self):
         """Serialize one confirmed draft sequence for the connected seller."""

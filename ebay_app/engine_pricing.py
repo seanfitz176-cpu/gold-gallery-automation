@@ -168,6 +168,45 @@ def implied_margin_percent(cost: SkuCost, live_price: Decimal) -> Decimal:
 
 
 @dataclass(frozen=True)
+class MarketSummary:
+    count: int
+    low: Optional[Decimal]
+    median: Optional[Decimal]
+    high: Optional[Decimal]
+
+
+MIN_COMPARABLES = 3
+# A target more than this % above the median comparable price is never run
+# automatically: it goes to the owner's queue with a note.
+MARKET_ABOVE_MEDIAN_QUEUE_PERCENT = Decimal("25")
+
+
+def summarize_market(prices) -> MarketSummary:
+    values = sorted(Decimal(p) for p in prices)
+    if not values:
+        return MarketSummary(0, None, None, None)
+    n = len(values)
+    mid = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
+    return MarketSummary(n, values[0], _round(mid), values[-1])
+
+
+def market_note(target: Optional[Decimal], market: MarketSummary) -> Tuple[Optional[str], bool]:
+    """(note, must_queue). Informational unless the target is far above the
+    market median, in which case the proposal must wait for the owner."""
+    if market.count < MIN_COMPARABLES or market.median is None:
+        return (f"Only {market.count} comparable listing(s) found; no market check." if market.count else None), False
+    if target is None:
+        return None, False
+    limit = market.median * (1 + MARKET_ABOVE_MEDIAN_QUEUE_PERCENT / HUNDRED)
+    if target > limit:
+        return (f"Target {target} is more than {MARKET_ABOVE_MEDIAN_QUEUE_PERCENT}% above the market "
+                f"median {market.median} ({market.count} comparables) -- needs your approval."), True
+    if market.low is not None and target < market.low:
+        return f"Target {target} is below the cheapest comparable ({market.low}).", False
+    return None, False
+
+
+@dataclass(frozen=True)
 class RepriceDecision:
     sku: str
     live_price: Decimal

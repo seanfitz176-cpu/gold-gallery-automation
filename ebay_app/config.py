@@ -447,6 +447,9 @@ class AppConfig:
     smtp_app_password: Optional[str] = None
     alert_email: Optional[str] = None
     engine_digest_hours: int = 6
+    # Read-only comparison with similar live listings (Browse API). Off by
+    # default: eBay may require Buy API approval for production use.
+    engine_market_check: bool = False
     # The kill switch's other half: when true, PriceService.confirm() claims
     # and journals the action exactly as normal but never calls eBay at all,
     # recording a result with "dry_run": True instead. Defaults to false
@@ -754,5 +757,6 @@ def load_config(
         smtp_app_password=env.get("APP_SMTP_APP_PASSWORD", "").strip() or None,
         alert_email=env.get("APP_ALERT_EMAIL", "").strip() or None,
         engine_digest_hours=_integer(env, "APP_ENGINE_DIGEST_HOURS", 6, 1, 168),
+        engine_market_check=_boolean(env, "APP_ENGINE_MARKET_CHECK", False),
     )
     return config

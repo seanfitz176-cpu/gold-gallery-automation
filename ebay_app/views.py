@@ -1432,12 +1432,13 @@ def engine_page(
         f"<td>{h((r.get('implied_margin') + '%') if r.get('implied_margin') else '-')}</td>"
         f"<td>{h((r.get('margin_used') + '%') if r.get('margin_used') else '-')}</td>"
         f"<td>{h(r.get('target') or '-')}</td>"
+        f"<td>{h((str(r.get('market_low')) + ' / ' + str(r.get('market_median')) + ' (' + str(r.get('market_count')) + ')') if r.get('market_median') else '-')}</td>"
         f"<td>{h(r.get('proposed') or '-')}</td>"
         f"<td>{h(r.get('status'))}</td>"
         f"<td>{h(r.get('reason'))}</td>"
         "</tr>"
         for r in rows
-    ) or '<tr><td colspan="9">No report yet. The first run happens on the next engine tick.</td></tr>'
+    ) or '<tr><td colspan="10">No report yet. The first run happens on the next engine tick.</td></tr>'
     generated = report.get("generated_at")
     def _proposal_buttons(p):
         pid = h(str(p["proposal_id"]))
@@ -1473,9 +1474,9 @@ def engine_page(
     body = f"""<div class="notice {kind}"><strong>{h(headline)}</strong> {h(detail)}</div>
     <section class="card">{settings}{controls}</section>
     <section class="card"><h2>Last price check</h2>
-    <p>{h('Generated at ' + str(generated) + ' (Unix time) · ' + str(report.get('listings', 0)) + ' listings · ' + str(report.get('proposals', 0)) + ' proposals') if generated else 'Not run yet.'}</p>
+    <p>{h('Generated at ' + str(generated) + ' (Unix time) · ' + str(report.get('listings', 0)) + ' listings · ' + str(report.get('proposals', 0)) + ' proposals · market check ' + str(report.get('market_check', 'off'))) if generated else 'Not run yet.'}</p>
     <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Live</th><th>Cost</th>
-    <th>Current margin</th><th>Target margin</th><th>Target</th><th>Proposed</th><th>Status</th><th>Why</th></tr></thead>
+    <th>Current margin</th><th>Target margin</th><th>Target</th><th>Market low / median (n)</th><th>Proposed</th><th>Status</th><th>Why</th></tr></thead>
     <tbody>{row_html}</tbody></table></div></section>
     <section class="card"><h2>Pending proposals</h2>
     <p>{h('Approve runs the change through the normal price-change checks (floor, max change, actions budget, live-price re-check, dry-run switch). Proposals expire after 24 hours.' if executes else 'Execution is unavailable in this configuration.')}</p>

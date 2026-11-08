@@ -158,11 +158,16 @@ Each step ships with tests and stays at `off` by default.
   `APP_ENGINE_REPRICE_HOURS=24`, plus one run straight after any cost
   import; relist check every 60 min (driven by sales); order watch every
   30 min.
-- **Known limitation, recommended follow-up:** a fixed margin ignores the
-  market. A target above comparable listings won't sell, and one below
-  leaves money behind. The shadow report should later add a read-only
-  comparison with similar live listings, using eBay's Browse API with the
-  app token, so you can sanity-check each margin.
+- **Market check (built, off by default):** `APP_ENGINE_MARKET_CHECK=true`
+  adds a read-only comparison with similar live fixed-price listings, via
+  eBay's Browse API with the app token, matched on the listing title and
+  excluding your own listing. The engine page shows the low and median
+  price and the number of comparables. A target more than 25% above the
+  median is **never run automatically**: it goes to your queue with a note.
+  With fewer than 3 comparables there's no check. eBay's documentation says
+  production use of Buy APIs can need approval, while eBay support has said
+  the search call only needs the basic app token. So if eBay refuses, the
+  report says "market check unavailable" and everything else carries on.
 
 Sources: ebay.co.uk/help/selling/fees-credits-invoices/selling-fees?id=4364;
 developer.ebay.com/develop/get-started/api-call-limits;

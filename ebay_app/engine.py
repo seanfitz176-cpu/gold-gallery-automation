@@ -30,7 +30,7 @@ from dataclasses import replace
 
 from .config import AppConfig
 from .ebay_client import EbayError
-from .engine_pricing import SkuCost, decide_reprice
+from .engine_pricing import SkuCost, decide_reprice, market_note, summarize_market
 from .storage import AppDatabase
 from .validation import ValidationError
 
@@ -80,6 +80,8 @@ class LiveListing:
     price_value: str
     currency: str
     available_quantity: Optional[int] = None
+    title: str = ""
+    listing_id: str = ""
 
 
 ListingReader = Callable[[], Iterable[LiveListing]]
@@ -99,6 +101,7 @@ class Engine:
         quantity_service=None,
         notifier=None,
         order_reader: Optional[Callable[[], Iterable[SeenOrder]]] = None,
+        market_reader: Optional[Callable[[LiveListing], Iterable[Decimal]]] = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -113,6 +116,7 @@ class Engine:
         # ebay_app.alerts.Notifier; None or unconfigured = no emails.
         self.notifier = notifier
         self.order_reader = order_reader
+        self.market_reader = market_reader
         self._dry_run_services: Dict[str, object] = {}
         self._execute_lock = threading.Lock()
 
@@ -466,6 +470,8 @@ class Engine:
         auto_mode = self.config.engine_mode in {"auto-dry", "auto"}
         rows: List[Dict[str, object]] = []
         proposals = 0
+        market_on = bool(self.config.engine_market_check and self.market_reader)
+        market_status = "on" if market_on else "off"
         for listing in listings:
             row: Dict[str, object] = {"sku": listing.sku, "live_price": listing.price_value,
                                       "currency": listing.currency}
@@ -505,14 +511,30 @@ class Engine:
                 "proposed": str(decision.proposed) if decision.proposed is not None else None,
                 "reason": decision.reason,
             })
+            must_queue = False
+            if market_on:
+                try:
+                    market = summarize_market(self.market_reader(listing))
+                    note, must_queue = market_note(decision.target, market)
+                    row.update({
+                        "market_count": market.count,
+                        "market_low": str(market.low) if market.low is not None else None,
+                        "market_median": str(market.median) if market.median is not None else None,
+                    })
+                    if note:
+                        row["reason"] = f"{row['reason']} {note}"
+                except EbayError as error:
+                    # Read-only and optional: never an engine error.
+                    market_on = False
+                    market_status = f"unavailable ({error.code})"
             if decision.proposed is None:
                 row["status"] = "no_margin" if decision.margin_used is None else "on_target"
             else:
-                route = "auto" if (auto_mode and decision.within_limits) else "queue"
+                route = "auto" if (auto_mode and decision.within_limits and not must_queue) else "queue"
                 self.database.record_engine_proposal(
                     sku=listing.sku, kind="price", current_value=str(live),
                     proposed_value=str(decision.proposed), currency=listing.currency,
-                    reason=decision.reason, decision=route, ttl_seconds=PROPOSAL_TTL_SECONDS,
+                    reason=str(row["reason"]), decision=route, ttl_seconds=PROPOSAL_TTL_SECONDS,
                 )
                 proposals += 1
                 row["status"] = f"proposed_{route}"
@@ -522,6 +544,7 @@ class Engine:
             "mode": self.config.engine_mode,
             "listings": len(listings),
             "proposals": proposals,
+            "market_check": market_status,
             "rows": rows[:MAX_REPORT_ROWS],
             "truncated": len(rows) > MAX_REPORT_ROWS,
         }
@@ -568,7 +591,18 @@ def listing_reader_from_service(listing_service) -> ListingReader:
 
     def read() -> Iterable[LiveListing]:
         summary = listing_service.retrieve()
-        return [LiveListing(l.sku, l.price_value, l.currency, l.available_quantity) for l in summary.listings]
+        return [LiveListing(l.sku, l.price_value, l.currency, l.available_quantity, l.title, l.listing_id)
+                for l in summary.listings]
+
+    return read
+
+
+def market_reader_from_client(ebay) -> Callable[[LiveListing], Iterable[Decimal]]:
+    """Comparable live listings for one of the seller's own listings."""
+
+    def read(listing: LiveListing) -> Iterable[Decimal]:
+        return ebay.search_comparable_listings(listing.title or listing.sku,
+                                               exclude_listing_id=listing.listing_id or None)
 
     return read
 

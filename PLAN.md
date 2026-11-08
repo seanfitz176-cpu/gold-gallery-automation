@@ -35,12 +35,18 @@ In an interactive session, Esc interrupts immediately.
 - CHECKPOINT: owner reviews the design and code, then pilots publishing in Sandbox
 
 ## Phase 3 — Autonomy engine design (no code)
-- [ ] `docs/autonomy_engine.md` covering: job scheduler, the policy model (actions inside the floor/cap/budget limits run automatically, everything else goes to an approval queue), approval-queue UI, notifications, the pause-all control, and the dry-run-first rollout
-- [ ] List of the owner's business decisions this needs (repricing rules, relist rules, notification channel)
+- [x] `docs/autonomy_engine.md` covering: job scheduler, the policy model (actions inside the floor/cap/budget limits run automatically, everything else goes to an approval queue), approval-queue UI, notifications, the pause-all control, and the dry-run-first rollout
+- [x] List of the owner's business decisions this needs (owner chose: margin over cost, relist when in stock, email; D1–D4 still open)
 - CHECKPOINT: owner signs off the design and answers the decisions
 
 ## Phase 4 — Scheduler, policy engine and approval queue (dry-run only)
-- [ ] Tasks to be written from the Phase 3 design once it is approved
+- [ ] Per-SKU cost table: storage (schema migration), dashboard page, CSV import
+- [ ] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause
+- [ ] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
+- [ ] `/queue` approval page executing through the existing services with a fixed engine session
+- [ ] Relist/restock job (quantity restore; ended listings queue a republish proposal only)
+- [ ] Email alerts via smtplib (immediate on unknown/pause/token failure; 6-hourly digest)
+- [ ] Order watch and health check jobs (alerts only)
 
 ## Phase 5 — Second seller account
 - [ ] Tasks to be written once the owner confirms how the two accounts should be separated

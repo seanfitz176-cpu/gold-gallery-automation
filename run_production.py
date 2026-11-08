@@ -50,6 +50,7 @@ from ebay_app.account_deletion import poll_once
 from ebay_app.ebay_client import EbaySandboxClient
 from ebay_app.storage import AppDatabase, StorageError
 from ebay_app.web import WebApplication
+from ebay_app.engine import Engine, EngineThread, describe, listing_reader_from_service
 
 # Resolved once, at import time, exactly the way run.py resolves its own
 # default ".env" path -- a fixed sibling file, never a value that can be
@@ -122,6 +123,7 @@ def _capability_description(config) -> str:
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     database = None
+    engine_thread = None
     try:
         if argv:
             raise ConfigError(
@@ -160,6 +162,13 @@ def main(argv=None) -> int:
             # application from starting (see ebay_app/account_deletion.py).
             logging.exception("Unexpected error during the account-deletion startup poll")
         application = WebApplication(config, database, ebay)
+        if config.engine_mode != "off":
+            engine = Engine(config, database, listing_reader_from_service(application.listing_service))
+            application.engine = engine
+            engine_thread = EngineThread(engine)
+            engine_thread.start()
+            headline, detail = describe(engine.status())
+            logging.warning("%s. %s", headline, detail)
         server = make_server(
             config.host,
             config.port,
@@ -186,6 +195,8 @@ def main(argv=None) -> int:
         logging.error("Cannot start: %s", error)
         return 1
     finally:
+        if engine_thread is not None:
+            engine_thread.stop()
         if database is not None:
             database.close()
 

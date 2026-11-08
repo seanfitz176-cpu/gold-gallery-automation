@@ -71,7 +71,9 @@ def main(argv: List[str]) -> int:
                 fee_percent=str(r.fee_percent), currency=r.currency,
                 margin_percent=str(r.margin_percent) if r.margin_percent is not None else None,
             )
+        database.set_engine_state("reprice_requested", "1")
         print(f"Saved {len(rows)} cost row(s). Existing rows for the same SKUs were replaced.")
+        print("If the engine is on, it will re-check prices within a minute of the app starting.")
         return 0
     except (ConfigError, StorageError) as error:
         print(f"Could not start: {error}")

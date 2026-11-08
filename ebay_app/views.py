@@ -1396,3 +1396,64 @@ def account_deletion_banner_page(deletion_state: Mapping[str, Any], csrf_token: 
         authenticated=True,
         csrf_token=csrf_token,
     )
+
+
+def engine_page(
+    status: Mapping[str, Any],
+    pending: Sequence[Mapping[str, Any]],
+    csrf_token: str,
+    environment: str = "Sandbox",
+    flashes: Sequence[Tuple[str, str]] = (),
+) -> str:
+    """Read-only engine report plus pause/resume/run-now controls."""
+    from .engine import describe
+
+    headline, detail = describe(dict(status))
+    paused = bool(status.get("paused_reason"))
+    kind = "warning" if paused or status.get("mode") == "off" else "info"
+    control_action, control_label = ("/engine/resume", "Resume engine") if paused else ("/engine/pause", "Pause engine")
+    controls = f"""<form method="post" action="{control_action}" class="inline">
+      <input type="hidden" name="csrf_token" value="{h(csrf_token)}">
+      <button type="submit">{h(control_label)}</button></form>
+    <form method="post" action="/engine/run" class="inline">
+      <input type="hidden" name="csrf_token" value="{h(csrf_token)}">
+      <button type="submit" class="secondary">Re-check prices on next tick</button></form>"""
+    margin = status.get("default_margin_percent")
+    settings = (f"<p>Mode <code>{h(status.get('mode'))}</code> · reprice every "
+                f"{h(status.get('reprice_hours'))} h · default margin "
+                f"{h(str(margin) + '%' if margin else 'none (per-SKU only)')}</p>")
+    report = status.get("report") or {}
+    rows = report.get("rows") or []
+    row_html = "".join(
+        "<tr>"
+        f"<td><code>{h(r.get('sku'))}</code></td>"
+        f"<td>{h(r.get('currency'))} {h(r.get('live_price'))}</td>"
+        f"<td>{h(r.get('total_cost') or '-')}</td>"
+        f"<td>{h((r.get('implied_margin') + '%') if r.get('implied_margin') else '-')}</td>"
+        f"<td>{h((r.get('margin_used') + '%') if r.get('margin_used') else '-')}</td>"
+        f"<td>{h(r.get('target') or '-')}</td>"
+        f"<td>{h(r.get('proposed') or '-')}</td>"
+        f"<td>{h(r.get('status'))}</td>"
+        f"<td>{h(r.get('reason'))}</td>"
+        "</tr>"
+        for r in rows
+    ) or '<tr><td colspan="9">No report yet. The first run happens on the next engine tick.</td></tr>'
+    generated = report.get("generated_at")
+    pending_html = "".join(
+        f"<tr><td><code>{h(p['sku'])}</code></td><td>{h(p['kind'])}</td>"
+        f"<td>{h(p.get('currency') or '')} {h(p['current_value'])} → {h(p['proposed_value'])}</td>"
+        f"<td>{h(p['decision'])}</td><td>{h(p['reason'])}</td></tr>"
+        for p in pending
+    ) or '<tr><td colspan="5">No pending proposals.</td></tr>'
+    body = f"""<div class="notice {kind}"><strong>{h(headline)}</strong> {h(detail)}</div>
+    <section class="card">{settings}{controls}</section>
+    <section class="card"><h2>Last price check</h2>
+    <p>{h('Generated at ' + str(generated) + ' (Unix time) · ' + str(report.get('listings', 0)) + ' listings · ' + str(report.get('proposals', 0)) + ' proposals') if generated else 'Not run yet.'}</p>
+    <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Live</th><th>Cost</th>
+    <th>Current margin</th><th>Target margin</th><th>Target</th><th>Proposed</th><th>Status</th><th>Why</th></tr></thead>
+    <tbody>{row_html}</tbody></table></div></section>
+    <section class="card"><h2>Pending proposals</h2>
+    <p>Nothing here is executed yet. Approving proposals arrives in a later build step.</p>
+    <div class="table-wrap"><table><thead><tr><th>SKU</th><th>Kind</th><th>Change</th><th>Route</th><th>Why</th></tr></thead>
+    <tbody>{pending_html}</tbody></table></div></section>"""
+    return layout(f"Autonomy engine ({environment})", body, authenticated=True, csrf_token=csrf_token, flashes=flashes)

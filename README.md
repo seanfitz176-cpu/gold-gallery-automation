@@ -224,6 +224,17 @@ Offer, exactly like the dashboard's own one-item draft flow. An optional
 `product.imageUrls` and must read back exactly, in order, or the row is
 reported `unknown`. Loading the CSV never contacts the image hosts.
 
+## Autonomy engine (in progress)
+
+Design: `docs/autonomy_engine.md`. Set `APP_ENGINE_MODE=shadow` and restart the
+app to see, on the dashboard's **Autonomy engine** page (`/engine`), each
+listing's cost, current margin, target price and the change the engine *would*
+propose. Nothing is executed yet. Load costs first with
+`python3 import_costs.py costs.csv` (app stopped; columns `sku,item_cost` plus
+optional `postage_cost,fee_percent,margin_percent`). There is no default margin:
+a SKU without one is reported but never repriced. **Pause engine** on that page
+stops every job until you resume it.
+
 ## Autonomous Claude sessions
 
 `.claude/` holds guard rails for letting Claude Code work through

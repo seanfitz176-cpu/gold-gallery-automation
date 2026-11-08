@@ -70,7 +70,10 @@ from .views import (
     quantity_action_page,
     image_review_page,
     image_action_page,
+    engine_page,
 )
+
+ENGINE_ROUTES = frozenset({"/engine", "/engine/pause", "/engine/resume", "/engine/run"})
 
 
 class RequestError(ValueError):
@@ -273,6 +276,7 @@ class WebApplication:
         image_service: Optional[ImageService] = None,
         sessions: Optional[SessionManager] = None,
         logger: Optional[logging.Logger] = None,
+        engine: Optional[Any] = None,
     ) -> None:
         if (
             config.host != CANONICAL_HOST
@@ -310,6 +314,8 @@ class WebApplication:
         self.sessions = sessions or SessionManager(config.cookie_secure)
         self.logger = logger or logging.getLogger("ebay_sandbox_app")
         self.login_limiter = LoginFailureLimiter()
+        # The autonomy engine (ebay_app/engine.py), when APP_ENGINE_MODE is not off.
+        self.engine = engine
         self.style = (Path(__file__).resolve().parents[1] / "static" / "style.css").read_bytes()
 
     def __call__(self, environ, start_response):
@@ -582,10 +588,16 @@ class WebApplication:
             and request.method == "GET"
             and re.fullmatch(r"/actions/[a-f0-9]{32}", request.path) is not None
         )
+        engine_route = (
+            request.path in ENGINE_ROUTES
+            and self.engine is not None
+            and self.config.engine_mode != "off"
+        )
         if (
             self.config.feature_stage != "full"
             and request.path not in stage_routes.get(self.config.feature_stage, set())
             and not dynamic_draft_result
+            and not engine_route
         ):
             raise RequestError(
                 f"This feature is locked until a later {self.config.environment.capitalize()} "
@@ -649,7 +661,7 @@ class WebApplication:
                     and granted_scopes_cover(
                         self.database.granted_scopes(), DRAFT_SCOPES
                     ),
-                )
+                ).replace("</main>", self._engine_dashboard_card() + "</main>", 1)
             )
         if request.path == "/connect" and request.method == "POST":
             self._check_csrf(request, session)
@@ -732,6 +744,28 @@ class WebApplication:
             return self._save_price_limit(request, session)
         if request.path == "/price-limits/delete" and request.method == "POST":
             return self._delete_price_limit(request, session)
+        if engine_route and request.path == "/engine" and request.method == "GET":
+            flashes = list(session.flashes)
+            session.flashes.clear()
+            return Response.html(engine_page(
+                self.engine.status(),
+                self.database.list_engine_proposals(("pending",), limit=200),
+                session.csrf_token,
+                self.config.environment.capitalize(),
+                flashes,
+            ))
+        if engine_route and request.method == "POST" and request.path in {"/engine/pause", "/engine/resume", "/engine/run"}:
+            self._check_csrf(request, session)
+            if request.path == "/engine/pause":
+                self.engine.pause("Paused from the dashboard")
+                session.flashes.append(("warning", "Engine paused. No job will run until you resume it."))
+            elif request.path == "/engine/resume":
+                self.engine.resume()
+                session.flashes.append(("success", "Engine resumed."))
+            else:
+                self.engine.request_reprice()
+                session.flashes.append(("info", "A price check will run on the next engine tick (within a minute)."))
+            return Response.redirect("/engine")
         if request.path == "/quantities/review" and request.method == "POST":
             return self._review_quantity(request, session)
         if request.path == "/images/review" and request.method == "POST":
@@ -804,6 +838,17 @@ class WebApplication:
                 action_page(action, session.csrf_token, self.config.environment.capitalize())
             )
         raise RequestError("Page not found", 404)
+
+    def _engine_dashboard_card(self) -> str:
+        """A link to the engine page on the dashboard, only when it is on."""
+        if self.engine is None or self.config.engine_mode == "off":
+            return ""
+        from .engine import describe
+        from .views import h
+
+        headline, _detail = describe(self.engine.status())
+        return (f'<section class="card"><h2>Autonomy engine</h2><p>{h(headline)}</p>'
+                '<p><a href="/engine">Open the engine page</a></p></section>')
 
     def _account_deletion(
         self, request: Request, session: Session, deletion_state: Mapping[str, Any]

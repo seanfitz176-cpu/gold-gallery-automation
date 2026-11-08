@@ -41,9 +41,9 @@ In an interactive session, Esc interrupts immediately.
 
 ## Phase 4 — Scheduler, policy engine and approval queue (dry-run only)
 - [x] Per-SKU cost table: storage (schema v11), pricing maths (`engine_pricing.py`), `import_costs.py` CSV import, engine settings in config
-- [ ] Dashboard page listing costs, implied current margin and break-even per SKU (read-only)
-- [ ] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause
-- [ ] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
+- [x] Dashboard page listing costs, implied current margin, target and proposal per SKU (read-only `/engine` page)
+- [x] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause, auto-pause after 3 errors
+- [x] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
 - [ ] `/queue` approval page executing through the existing services with a fixed engine session
 - [ ] Relist/restock job (quantity restore; ended listings queue a republish proposal only)
 - [ ] Email alerts via smtplib (immediate on unknown/pause/token failure; 6-hourly digest)

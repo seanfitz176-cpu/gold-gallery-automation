@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -1618,6 +1618,102 @@ class AppDatabase:
         with self._lock, self._connection:
             cursor = self._connection.execute("DELETE FROM sku_costs WHERE sku = ?", (sku,))
             return cursor.rowcount > 0
+
+    # -- Autonomy engine: state and proposals (schema v11) -----------------
+
+    def get_engine_state(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM engine_state WHERE key = ?", (key,)
+            ).fetchone()
+            return str(row["value"]) if row is not None else None
+
+    def set_engine_state(self, key: str, value: str) -> None:
+        now = int(self._now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO engine_state (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (key, value, now),
+            )
+
+    def delete_engine_state(self, key: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM engine_state WHERE key = ?", (key,))
+
+    def record_engine_proposal(
+        self,
+        *,
+        sku: str,
+        kind: str,
+        current_value: str,
+        proposed_value: str,
+        currency: Optional[str],
+        reason: str,
+        decision: str,
+        ttl_seconds: int,
+    ) -> int:
+        """Store one proposal. Any older still-pending proposal for the same
+        SKU and kind is marked ``superseded`` in the same transaction, so at
+        most one pending proposal per SKU/kind ever exists."""
+        now = int(self._now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE engine_proposals SET status = 'superseded', updated_at = ?
+                WHERE sku = ? AND kind = ? AND status = 'pending'
+                """,
+                (now, sku, kind),
+            )
+            cursor = self._connection.execute(
+                """
+                INSERT INTO engine_proposals
+                    (sku, kind, current_value, proposed_value, currency, reason, decision,
+                     status, created_at, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (sku, kind, current_value, proposed_value, currency, reason, decision,
+                 now, now + int(ttl_seconds), now),
+            )
+            return int(cursor.lastrowid)
+
+    def list_engine_proposals(
+        self, statuses: Sequence[str] = ("pending",), limit: int = 500
+    ) -> Tuple[Dict[str, Any], ...]:
+        placeholders = ",".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT proposal_id, sku, kind, current_value, proposed_value, currency, reason,
+                       decision, status, created_at, expires_at, updated_at
+                FROM engine_proposals WHERE status IN ({placeholders})
+                ORDER BY created_at DESC, proposal_id DESC LIMIT ?
+                """,
+                (*statuses, int(limit)),
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    def set_engine_proposal_status(self, proposal_id: int, status: str, *, expected: str = "pending") -> bool:
+        """Compare-and-set, so a proposal can never be acted on twice."""
+        now = int(self._now())
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE engine_proposals SET status = ?, updated_at = ? WHERE proposal_id = ? AND status = ?",
+                (status, now, int(proposal_id), expected),
+            )
+            return cursor.rowcount == 1
+
+    def expire_engine_proposals(self) -> int:
+        now = int(self._now())
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE engine_proposals SET status = 'expired', updated_at = ? "
+                "WHERE status = 'pending' AND expires_at <= ?",
+                (now, now),
+            )
+            return cursor.rowcount
 
     def record_deletion_notification_processed(
         self, notification_id: str, user_id: str, *, matched_owner: bool

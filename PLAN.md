@@ -58,7 +58,7 @@ In an interactive session, Esc interrupts immediately.
 - [x] List of the owner's business decisions this needs (owner chose: margin over cost, relist when in stock, email; D1–D4 still open)
 - CHECKPOINT: owner signs off the design and answers the decisions
 
-## Phase 4 — Scheduler, policy engine and approval queue (dry-run only)
+## Phase 4 — Scheduler, policy engine and approval queue
 - [x] Per-SKU cost table: storage (schema v11), pricing maths (`engine_pricing.py`), `import_costs.py` CSV import, engine settings in config
 - [x] Dashboard page listing costs, implied current margin, target and proposal per SKU (read-only `/engine` page)
 - [x] `engine_proposals` table, scheduler thread inside the app process, `APP_ENGINE_MODE` (off/shadow/auto-dry/auto), persistent pause, auto-pause after 3 errors
@@ -66,7 +66,9 @@ In an interactive session, Esc interrupts immediately.
 - [x] Approval queue (Approve/Reject on `/engine`) executing through the existing `PriceService` with a fixed engine session; auto-dry/auto run in-limit proposals; unknown outcome pauses the engine
 - [x] Relist/restock job: one-off restock instructions via `stock_quantity` in the cost CSV, quantity proposals through `QuantityService`, advice-only republish proposals, sold-since-proposal → superseded
 - [x] Email alerts via smtplib + STARTTLS (immediate on any pause incl. unknown outcome; digest at most every `APP_ENGINE_DIGEST_HOURS`, only when something is waiting or happened); off until the owner enters SMTP settings
-- [ ] Order watch and health check jobs (alerts only)
+- [x] Order watch (emails new orders; first run seeds silently) and health check (connection/permission problems pause at once; transient errors after 3 in a row)
+
+- CHECKPOINT: owner reviews, then tries shadow mode in Sandbox with a cost CSV
 
 ## Phase 5 — Second seller account
 - [ ] Tasks to be written once the owner confirms how the two accounts should be separated

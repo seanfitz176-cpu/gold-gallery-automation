@@ -464,3 +464,53 @@ class EngineRestockTests(EngineTestCase):
         pid = self.database.list_engine_proposals()[0]["proposal_id"]
         self.assertEqual(engine.execute_proposal(pid), "failed")
         self.assertIn("QUANTITY_STAGE_LOCKED", self.database.get_engine_proposal(pid)["outcome"])
+
+
+class OrderWatchAndHealthTests(EngineTestCase):
+    def test_first_run_seeds_silently_then_new_orders_are_emailed_once(self):
+        from ebay_app.engine import SeenOrder
+
+        sent = []
+
+        class Note:
+            configured = True
+
+            def send(self, subject, body):
+                sent.append((subject, body))
+                return True
+
+        orders = [SeenOrder("O-1", "2026-11-08", "FULFILLED", "20.00", "GBP")]
+        engine = Engine(self.config, self.database, self.reader, now=self.clock,
+                        notifier=Note(), order_reader=lambda: list(orders))
+        self.assertEqual(engine.run_order_watch(), [])
+        self.assertEqual(sent, [])
+        orders.append(SeenOrder("O-2", "2026-11-08", "NOT_STARTED", "35.00", "GBP"))
+        new = engine.run_order_watch()
+        self.assertEqual([o.order_id for o in new], ["O-2"])
+        self.assertEqual(len(sent), 1)
+        self.assertIn("O-2", sent[0][1])
+        self.assertEqual(engine.run_order_watch(), [])
+        self.assertEqual(len(sent), 1)
+
+    def test_connection_problems_pause_immediately_with_a_clear_reason(self):
+        from ebay_app.ebay_client import EbayError
+
+        def disconnected():
+            raise EbayError("verify", code="CONNECTION_NOT_VERIFIED")
+
+        engine = Engine(self.config, self.database, disconnected, now=self.clock)
+        engine.tick()
+        self.assertIn("not verified", engine.paused_reason())
+
+    def test_transient_errors_still_need_three_in_a_row(self):
+        from ebay_app.ebay_client import EbayError
+
+        def flaky():
+            raise EbayError("timeout", code="EBAY_CONNECTION_ERROR")
+
+        engine = Engine(self.config, self.database, flaky, now=self.clock)
+        engine.tick()
+        engine.tick()
+        self.assertIsNone(engine.paused_reason())
+        engine.tick()
+        self.assertIn("3 consecutive", engine.paused_reason())

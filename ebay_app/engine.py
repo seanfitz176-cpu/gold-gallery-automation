@@ -47,6 +47,31 @@ STATE_ERRORS = "consecutive_errors"
 STATE_REPRICE_REQUESTED = "reprice_requested"
 STATE_LAST_RESTOCK = "last_restock_at"
 STATE_LAST_DIGEST = "last_digest_at"
+STATE_LAST_ORDERS = "last_orders_at"
+STATE_SEEN_ORDERS = "seen_order_ids"
+MAX_SEEN_ORDERS = 1000
+
+# Connection/permission problems that retrying cannot fix: pause at once
+# with a clear reason instead of waiting for three failures.
+PAUSE_IMMEDIATELY_CODES = {
+    "NOT_CONNECTED": "the eBay connection is missing -- reconnect from the dashboard",
+    "CONNECTION_NOT_VERIFIED": "the eBay connection is not verified -- verify it from the dashboard",
+    "CONNECTION_CHANGED": "the eBay connection changed -- verify it from the dashboard",
+    "EBAY_REAUTH_REQUIRED": "eBay needs you to sign in again -- reconnect from the dashboard",
+    "EBAY_INVALID_CLIENT": "eBay rejected the app's credentials -- check the keyset",
+    "EBAY_INVALID_SCOPE": "eBay rejected the requested permissions -- reconnect from the dashboard",
+    "LISTING_PERMISSION_REQUIRED": "listing permission is missing -- authorize it from the dashboard",
+    "ORDER_PERMISSION_REQUIRED": "order permission is missing -- authorize it from the dashboard",
+}
+
+
+@dataclass(frozen=True)
+class SeenOrder:
+    order_id: str
+    created_at: str
+    fulfillment_status: str
+    total_value: str
+    currency: str
 
 
 @dataclass(frozen=True)
@@ -73,6 +98,7 @@ class Engine:
         price_service=None,
         quantity_service=None,
         notifier=None,
+        order_reader: Optional[Callable[[], Iterable[SeenOrder]]] = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -86,6 +112,7 @@ class Engine:
         self.quantity_service = quantity_service
         # ebay_app.alerts.Notifier; None or unconfigured = no emails.
         self.notifier = notifier
+        self.order_reader = order_reader
         self._dry_run_services: Dict[str, object] = {}
         self._execute_lock = threading.Lock()
 
@@ -153,6 +180,38 @@ class Engine:
             return True
         return self.now() - int(last) >= self.config.engine_relist_minutes * 60
 
+    def _orders_due(self) -> bool:
+        if self.order_reader is None:
+            return False
+        last = self.database.get_engine_state(STATE_LAST_ORDERS)
+        if not last or not last.isdigit():
+            return True
+        return self.now() - int(last) >= self.config.engine_orders_minutes * 60
+
+    def run_order_watch(self) -> List[SeenOrder]:
+        """Email about orders not seen before. Read-only; alerts only.
+        The very first run only records existing orders (no email flood)."""
+        orders = list(self.order_reader()) if self.order_reader else []
+        raw = self.database.get_engine_state(STATE_SEEN_ORDERS)
+        first_run = raw is None
+        try:
+            seen = list(json.loads(raw)) if raw else []
+        except ValueError:
+            seen = []
+        seen_set = set(seen)
+        new = [o for o in orders if o.order_id not in seen_set]
+        for order in new:
+            seen.append(order.order_id)
+        self.database.set_engine_state(STATE_SEEN_ORDERS, json.dumps(seen[-MAX_SEEN_ORDERS:]))
+        self.database.set_engine_state(STATE_LAST_ORDERS, str(int(self.now())))
+        if new and not first_run and self.notifier is not None:
+            lines = [f"  {o.order_id}: {o.currency} {o.total_value}, {o.fulfillment_status}, placed {o.created_at}"
+                     for o in new[:30]]
+            self.notifier.send(f"{len(new)} new order(s)",
+                               "New eBay order(s):\n" + "\n".join(lines) +
+                               "\n\nDispatch them from Seller Hub.")
+        return [] if first_run else new
+
     def tick(self) -> None:
         """One scheduler pass. Safe to call at any time."""
         if self.config.engine_mode == "off":
@@ -165,17 +224,29 @@ class Engine:
                 self.run_reprice()
             if self._restock_due():
                 self.run_restock()
+            if self._orders_due():
+                self.run_order_watch()
             self.run_auto()
             self.maybe_send_digest()
+        except EbayError as error:
+            reason = PAUSE_IMMEDIATELY_CODES.get(error.code)
+            if reason:
+                self.pause(f"Health check: {reason} ({error.code}).")
+                return
+            self._count_error(error)
+            return
         except Exception as error:  # noqa: BLE001 - recorded, counted, never re-raised
-            count = int(self.database.get_engine_state(STATE_ERRORS) or "0") + 1
-            self.database.set_engine_state(STATE_ERRORS, str(count))
-            self.logger.warning("Engine job failed (%s in a row): %s", count, type(error).__name__)
-            if count >= AUTO_PAUSE_AFTER_ERRORS:
-                self.pause(f"Paused automatically after {count} consecutive job errors "
-                           f"(last: {type(error).__name__}: {error})")
+            self._count_error(error)
             return
         self.database.set_engine_state(STATE_ERRORS, "0")
+
+    def _count_error(self, error: Exception) -> None:
+        count = int(self.database.get_engine_state(STATE_ERRORS) or "0") + 1
+        self.database.set_engine_state(STATE_ERRORS, str(count))
+        self.logger.warning("Engine job failed (%s in a row): %s", count, type(error).__name__)
+        if count >= AUTO_PAUSE_AFTER_ERRORS:
+            self.pause(f"Paused automatically after {count} consecutive job errors "
+                       f"(last: {type(error).__name__}: {error})")
 
     # -- execution ------------------------------------------------------------
 
@@ -498,6 +569,17 @@ def listing_reader_from_service(listing_service) -> ListingReader:
     def read() -> Iterable[LiveListing]:
         summary = listing_service.retrieve()
         return [LiveListing(l.sku, l.price_value, l.currency, l.available_quantity) for l in summary.listings]
+
+    return read
+
+
+def order_reader_from_service(order_service) -> Callable[[], Iterable[SeenOrder]]:
+    """Adapt ``OrderService.retrieve()`` (verified, scope-checked reads)."""
+
+    def read() -> Iterable[SeenOrder]:
+        summary = order_service.retrieve()
+        return [SeenOrder(o.order_id, o.created_at, o.fulfillment_status, o.total_value, o.currency)
+                for o in summary.orders]
 
     return read
 

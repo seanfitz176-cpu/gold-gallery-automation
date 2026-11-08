@@ -16,7 +16,13 @@ from ebay_app.account_deletion import poll_once
 from ebay_app.ebay_client import EbaySandboxClient
 from ebay_app.storage import AppDatabase, StorageError
 from ebay_app.web import WebApplication
-from ebay_app.engine import Engine, EngineThread, describe, listing_reader_from_service
+from ebay_app.engine import (
+    Engine,
+    EngineThread,
+    describe,
+    listing_reader_from_service,
+    order_reader_from_service,
+)
 from ebay_app.alerts import Notifier
 
 
@@ -93,6 +99,13 @@ def main(argv=None) -> int:
                 ebay=ebay, price_service=application.price_service,
                 quantity_service=application.quantity_service,
                 notifier=Notifier(config),
+                # Order watch only where the stage grants order permission;
+                # elsewhere it would just trip the permission health check.
+                order_reader=(
+                    order_reader_from_service(application.order_service)
+                    if config.feature_stage in {"orders", "drafts", "prices", "quantities", "images"}
+                    else None
+                ),
             )
             application.engine = engine
             engine_thread = EngineThread(engine)

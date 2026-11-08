@@ -87,9 +87,13 @@ not bolted on later.
 
 Ambiguous/uncertain outcomes are **journaled, never auto-retried**. The admin
 action journal (`ebay_app/storage.py`'s `actions` / `action_events` tables) is
-append-only and encrypted at rest; `recent_actions()` currently caps at 50 rows
-with no filtering -- a fuller queryable/exportable audit report does not exist yet
-(flagged as an open gap in the Phase 9 readiness report).
+append-only and encrypted at rest. `recent_actions()` stays capped at 50 rows
+with no filtering (used by the dashboard's own recent-confirmations view);
+`AppDatabase.export_actions()` (added 2026-11-08) is the fuller, unfiltered,
+filterable export that closes the "no queryable/exportable audit report" gap
+flagged in the Phase 9 readiness report -- see `export_audit_log.py` at the
+repo root for the read-only CLI wrapper (no eBay call, no live connection
+needed, safe to run against either environment's local database any time).
 
 ## Working conventions -- follow these exactly
 
@@ -184,6 +188,12 @@ order fulfillment writes. `docs/ROADMAP.md` and `docs/phase9_production_design.m
 both explicitly state these are future phases, planned only after Phase 9 is
 live and proven -- don't start designing or building any of them without Sean
 explicitly asking for that specific phase.
+
+**Done, 2026-11-08, autonomous (code-only, no eBay call, no decision needed from
+Sean):** the Section 6.6 audit-log export gap -- `AppDatabase.export_actions()`
+plus `ebay_app/audit_export.py` (pure formatting) plus `export_audit_log.py`
+(CLI). 22 new tests, full suite green at 668/668. Also added this file
+(`CLAUDE.md`) itself.
 
 **Open, low-priority, explicitly deferred by Sean ("not urgent")**: a stale
 Sandbox credential backup file (`.env.bak.20260922000429`) not rotated since

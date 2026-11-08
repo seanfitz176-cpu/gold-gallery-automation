@@ -126,7 +126,7 @@ class Engine:
             self.notifier.send(
                 "Engine PAUSED",
                 f"The autonomy engine has paused.\n\nReason: {reason}\n\n"
-                "No job will run until you press Resume on http://127.0.0.1:5000/engine.",
+                f"No job will run until you press Resume on http://127.0.0.1:{self.config.port}/engine.",
             )
 
     def resume(self) -> None:
@@ -404,7 +404,7 @@ class Engine:
             lines.append("")
         if no_cost:
             lines.append(f"{no_cost} live listing(s) have no cost recorded and are never repriced.")
-        lines.append("Review: http://127.0.0.1:5000/engine")
+        lines.append(f"Review: http://127.0.0.1:{self.config.port}/engine")
         sent = self.notifier.send(f"Engine digest: {len(waiting)} waiting, {len(finished)} done", "\n".join(lines))
         if sent:
             self.database.set_engine_state(STATE_LAST_DIGEST, str(now))

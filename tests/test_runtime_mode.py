@@ -60,10 +60,18 @@ class PermanentOAuthConfigurationTests(unittest.TestCase):
             with self.subTest(host=host):
                 with self.assertRaisesRegex(ConfigError, "HOST must remain"):
                     self.load(HOST=host)
-        for port in ("3000", "4999", "5001"):
+        for port in ("3000", "4999", "5002"):
             with self.subTest(port=port):
                 with self.assertRaisesRegex(ConfigError, "PORT must remain"):
                     self.load(PORT=port)
+
+    def test_second_account_port_requires_an_account_label(self):
+        with self.assertRaisesRegex(ConfigError, "APP_ACCOUNT_LABEL"):
+            self.load(PORT="5001")
+        config = self.load(PORT="5001", APP_ACCOUNT_LABEL="Second shop")
+        self.assertEqual((config.port, config.account_label), (5001, "Second shop"))
+        with self.assertRaisesRegex(ConfigError, "APP_ACCOUNT_LABEL"):
+            self.load(PORT="5001", APP_ACCOUNT_LABEL="<script>")
 
     def test_deprecated_tunnel_runtime_settings_are_rejected(self):
         for name in (

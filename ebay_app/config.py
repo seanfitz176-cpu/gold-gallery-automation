@@ -27,6 +27,13 @@ RUNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 # HTTPS callback relay forwards the browser to this loopback URL.
 CANONICAL_HOST = "127.0.0.1"
 CANONICAL_PORT = 5000
+# Phase 5 (second seller account, docs/second_account.md): one extra port is
+# allowed so a second, fully separate copy of the app can run at the same
+# time. eBay's OAuth relay always returns to CANONICAL_PORT, so an instance
+# on SECONDARY_PORT can never start an eBay sign-in -- it is connected once
+# while temporarily run on 5000, then used day to day on 5001.
+SECONDARY_PORT = 5001
+ALLOWED_PORTS = (CANONICAL_PORT, SECONDARY_PORT)
 CANONICAL_CALLBACK_PATH = "/oauth/callback"
 CANONICAL_CALLBACK_URL = (
     f"http://{CANONICAL_HOST}:{CANONICAL_PORT}{CANONICAL_CALLBACK_PATH}"
@@ -430,6 +437,8 @@ class AppConfig:
     engine_reprice_hours: int = 24
     engine_relist_minutes: int = 60
     engine_orders_minutes: int = 30
+    # Shown on every page and email when set; required on SECONDARY_PORT.
+    account_label: Optional[str] = None
     # Email alerts (ebay_app/alerts.py). All unset = alerts off. The app
     # password is a credential the owner enters; it is never logged or shown.
     smtp_host: Optional[str] = None
@@ -623,9 +632,21 @@ def load_config(
             f"HOST must remain {CANONICAL_HOST} for the permanent local OAuth callback"
         )
     configured_port = _integer(env, "PORT", CANONICAL_PORT, 1, 65535)
-    if configured_port != CANONICAL_PORT:
+    account_label = env.get("APP_ACCOUNT_LABEL", "").strip()
+    if account_label and (
+        len(account_label) > 40
+        or not re.fullmatch(r"[A-Za-z0-9 ._-]+", account_label)
+    ):
+        raise ConfigError("APP_ACCOUNT_LABEL must be 1-40 letters, digits, spaces, dots, dashes or underscores")
+    if configured_port not in ALLOWED_PORTS:
         raise ConfigError(
-            f"PORT must remain {CANONICAL_PORT} for the permanent local OAuth callback"
+            f"PORT must remain {CANONICAL_PORT} for the permanent local OAuth callback "
+            f"(or {SECONDARY_PORT} for a labelled second-account copy)"
+        )
+    if configured_port == SECONDARY_PORT and not account_label:
+        raise ConfigError(
+            f"PORT {SECONDARY_PORT} is only for a second-account copy: set APP_ACCOUNT_LABEL "
+            "(e.g. APP_ACCOUNT_LABEL=Second shop) so the two accounts can never be confused"
         )
     if environment == "production":
         api_origin = PRODUCTION_API_ORIGIN
@@ -695,7 +716,8 @@ def load_config(
         return_policy_id=optional_seller_values["EBAY_RETURN_POLICY_ID"],
         database_path=database_path,
         host=CANONICAL_HOST,
-        port=CANONICAL_PORT,
+        port=configured_port,
+        account_label=account_label or None,
         allowed_hosts=LOCAL_ALLOWED_HOSTS,
         cookie_secure=False,
         request_timeout_seconds=_integer(env, "EBAY_REQUEST_TIMEOUT_SECONDS", 15, 3, 60),

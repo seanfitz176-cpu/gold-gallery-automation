@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import html
 import logging
 import re
 import threading
@@ -16,6 +17,7 @@ from .config import (
     AppConfig,
     CANONICAL_HOST,
     CANONICAL_PORT,
+    ALLOWED_PORTS,
     DRAFT_SCOPES,
     LISTING_SCOPES,
     ORDER_SCOPES,
@@ -281,7 +283,7 @@ class WebApplication:
     ) -> None:
         if (
             config.host != CANONICAL_HOST
-            or config.port != CANONICAL_PORT
+            or config.port not in ALLOWED_PORTS
             or config.allowed_hosts != (CANONICAL_HOST,)
             or config.cookie_secure
             or config.runtime_mode != "local"
@@ -354,6 +356,15 @@ class WebApplication:
                 500,
             )
 
+        if self.config.account_label and response.content_type.startswith("text/html"):
+            # Phase 5: with two account copies running, every page names its account.
+            label = html.escape(self.config.account_label).encode("utf-8")
+            response.body = response.body.replace(
+                b'<main class="shell" id="main">',
+                b'<main class="shell" id="main"><div class="notice info" role="status"><strong>Account: '
+                + label + b"</strong></div>",
+                1,
+            )
         if self.config.environment == "production" and response.content_type.startswith(
             "text/html"
         ):
@@ -397,7 +408,7 @@ class WebApplication:
             raise RequestError("Invalid Host header", 400) from exc
         if (
             parsed.hostname != CANONICAL_HOST
-            or port != CANONICAL_PORT
+            or port != self.config.port
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path
@@ -666,6 +677,12 @@ class WebApplication:
             )
         if request.path == "/connect" and request.method == "POST":
             self._check_csrf(request, session)
+            if self.config.port != CANONICAL_PORT:
+                raise RequestError(
+                    f"eBay sign-in only returns to port {CANONICAL_PORT}. Stop the other copy, run this "
+                    f"one once with PORT={CANONICAL_PORT} to connect, then switch back.",
+                    409,
+                )
             authorization_url = self._validate_authorization_url(
                 self.ebay.authorization_url(session.session_id)
             )

@@ -71,4 +71,9 @@ In an interactive session, Esc interrupts immediately.
 - CHECKPOINT: owner reviews, then tries shadow mode in Sandbox with a cost CSV
 
 ## Phase 5 — Second seller account
-- [ ] Tasks to be written once the owner confirms how the two accounts should be separated
+Owner's choice: one separate copy of the app per account.
+- [x] Allow exactly one extra port (5001), only with `APP_ACCOUNT_LABEL` set; Host header bound to the configured port
+- [x] A copy on 5001 refuses eBay sign-in (the relay returns to 5000) with clear instructions
+- [x] Account name on every page and in every alert email; engine links use the copy's own port
+- [x] `docs/second_account.md` step-by-step setup; tests
+- CHECKPOINT: owner reviews, then sets up the second copy following the guide

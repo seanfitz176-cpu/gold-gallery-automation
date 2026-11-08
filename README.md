@@ -235,6 +235,11 @@ optional `postage_cost,fee_percent,margin_percent,stock_quantity`; `stock_quanti
 a SKU without one is reported but never repriced. **Pause engine** on that page
 stops every job until you resume it.
 
+## Second seller account
+
+Run a second, fully separate copy of the app on port 5001 with its own
+settings, database and account name. Step-by-step: `docs/second_account.md`.
+
 ## Autonomous Claude sessions
 
 `.claude/` holds guard rails for letting Claude Code work through

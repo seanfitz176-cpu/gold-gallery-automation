@@ -46,7 +46,10 @@ class Notifier:
         if not self.configured:
             return False
         message = EmailMessage()
-        message["Subject"] = f"[eBay {self.config.environment.capitalize()}] {subject}"[:200]
+        tag = self.config.environment.capitalize()
+        if self.config.account_label:
+            tag = f"{tag} - {self.config.account_label}"
+        message["Subject"] = f"[eBay {tag}] {subject}"[:200]
         message["From"] = self.config.smtp_user
         message["To"] = self.config.alert_email
         message.set_content(body[:20000])

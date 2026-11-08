@@ -176,18 +176,36 @@ management via the new `migration` stage. Production write capability
 Production is Sean's own future, separate decision, documented step-by-step in
 `claude/supervised_dry_run_plan.md`.
 
-**Built and tested but never run live:** the bulk-CSV-upload feature
-(`bulk_listings.py` / `bulk_upload_listings.py`) -- 11 tests, fully passing, but
-blocked on Sean reconnecting the Sandbox OAuth grant (it had lapsed as of
-2026-11-08) and then choosing when to run it for the first time. Deliberately
-does not publish anything or attach images -- both flagged as separate,
-not-yet-requested future decisions in the module's own docstring.
+**Built and tested, never run live (Sean asked for all of these on 2026-11-08;
+work tracked in `PLAN.md`):**
+- Bulk CSV upload (`bulk_upload_listings.py`), now with an optional
+  `image_urls` column.
+- A gated **publish** step: `publish` stage, `APP_ALLOW_PRODUCTION_PUBLISH`,
+  `bulk_publish_listings.py`, design in `docs/publish_design.md`.
+- The **autonomy engine** (`ebay_app/engine.py`, design and decisions in
+  `docs/autonomy_engine.md`). It does margin-over-cost repricing, one-off
+  restock instructions, order watch, health check, email alerts and an
+  optional read-only market check. Everything executes through the existing
+  `PriceService`/`QuantityService`. It's off by default (`APP_ENGINE_MODE`),
+  and there's deliberately **no default margin**.
+- **Second seller account** as a separate labelled copy on port 5001
+  (`docs/second_account.md`).
+- Next step for all of them: Sean's Sandbox trials, in the order upload →
+  publish → engine in `shadow`.
 
-**Not started, not designed:** dynamic repricing, auto-relist, buyer messaging,
-order fulfillment writes. `docs/ROADMAP.md` and `docs/phase9_production_design.md`
-both explicitly state these are future phases, planned only after Phase 9 is
-live and proven -- don't start designing or building any of them without Sean
-explicitly asking for that specific phase.
+**Not started:** buyer messaging and order-fulfilment writes. Don't design or
+build these without Sean explicitly asking.
+
+## Autonomous Claude sessions (read before working unattended)
+`PLAN.md` explains how this repository is built autonomously with human
+checkpoints. "One goal, two layers" there maps Claude's build oversight onto the
+app's own runtime oversight. `.claude/settings.json` wires two hooks:
+`.claude/hooks/gate.py` blocks secrets, live eBay commands, pushes and edits
+while a checkpoint awaits approval; `.claude/hooks/stop_gate.py` keeps working
+through `PLAN.md` until the phase's checkpoint note is written. Sean controls it
+with `python3 .claude/ctl.py stop|resume|status|approve N|reject N`. Run
+unattended sessions only in a clean clone with no `.env*`, because the gate
+refuses to run tests beside a real `.env.production`.
 
 **Done, 2026-11-08, autonomous (code-only, no eBay call, no decision needed from
 Sean):** the Section 6.6 audit-log export gap -- `AppDatabase.export_actions()`

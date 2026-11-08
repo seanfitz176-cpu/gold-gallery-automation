@@ -51,6 +51,7 @@ from ebay_app.ebay_client import EbaySandboxClient
 from ebay_app.storage import AppDatabase, StorageError
 from ebay_app.web import WebApplication
 from ebay_app.engine import Engine, EngineThread, describe, listing_reader_from_service
+from ebay_app.alerts import Notifier
 
 # Resolved once, at import time, exactly the way run.py resolves its own
 # default ".env" path -- a fixed sibling file, never a value that can be
@@ -167,6 +168,7 @@ def main(argv=None) -> int:
                 config, database, listing_reader_from_service(application.listing_service),
                 ebay=ebay, price_service=application.price_service,
                 quantity_service=application.quantity_service,
+                notifier=Notifier(config),
             )
             application.engine = engine
             engine_thread = EngineThread(engine)

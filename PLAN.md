@@ -65,7 +65,7 @@ In an interactive session, Esc interrupts immediately.
 - [x] Reprice job (margin over cost, clamped to max change %, floor) and policy decision, shadow mode only
 - [x] Approval queue (Approve/Reject on `/engine`) executing through the existing `PriceService` with a fixed engine session; auto-dry/auto run in-limit proposals; unknown outcome pauses the engine
 - [x] Relist/restock job: one-off restock instructions via `stock_quantity` in the cost CSV, quantity proposals through `QuantityService`, advice-only republish proposals, sold-since-proposal → superseded
-- [ ] Email alerts via smtplib (immediate on unknown/pause/token failure; 6-hourly digest)
+- [x] Email alerts via smtplib + STARTTLS (immediate on any pause incl. unknown outcome; digest at most every `APP_ENGINE_DIGEST_HOURS`, only when something is waiting or happened); off until the owner enters SMTP settings
 - [ ] Order watch and health check jobs (alerts only)
 
 ## Phase 5 — Second seller account

@@ -430,6 +430,14 @@ class AppConfig:
     engine_reprice_hours: int = 24
     engine_relist_minutes: int = 60
     engine_orders_minutes: int = 30
+    # Email alerts (ebay_app/alerts.py). All unset = alerts off. The app
+    # password is a credential the owner enters; it is never logged or shown.
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_user: Optional[str] = None
+    smtp_app_password: Optional[str] = None
+    alert_email: Optional[str] = None
+    engine_digest_hours: int = 6
     # The kill switch's other half: when true, PriceService.confirm() claims
     # and journals the action exactly as normal but never calls eBay at all,
     # recording a result with "dry_run": True instead. Defaults to false
@@ -718,5 +726,11 @@ def load_config(
         engine_reprice_hours=_integer(env, "APP_ENGINE_REPRICE_HOURS", 24, 1, 168),
         engine_relist_minutes=_integer(env, "APP_ENGINE_RELIST_MINUTES", 60, 5, 1440),
         engine_orders_minutes=_integer(env, "APP_ENGINE_ORDERS_MINUTES", 30, 5, 1440),
+        smtp_host=env.get("APP_SMTP_HOST", "").strip() or None,
+        smtp_port=_integer(env, "APP_SMTP_PORT", 587, 1, 65535),
+        smtp_user=env.get("APP_SMTP_USER", "").strip() or None,
+        smtp_app_password=env.get("APP_SMTP_APP_PASSWORD", "").strip() or None,
+        alert_email=env.get("APP_ALERT_EMAIL", "").strip() or None,
+        engine_digest_hours=_integer(env, "APP_ENGINE_DIGEST_HOURS", 6, 1, 168),
     )
     return config

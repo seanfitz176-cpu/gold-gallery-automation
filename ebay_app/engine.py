@@ -46,6 +46,7 @@ STATE_REPORT = "last_reprice_report"
 STATE_ERRORS = "consecutive_errors"
 STATE_REPRICE_REQUESTED = "reprice_requested"
 STATE_LAST_RESTOCK = "last_restock_at"
+STATE_LAST_DIGEST = "last_digest_at"
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class Engine:
         ebay=None,
         price_service=None,
         quantity_service=None,
+        notifier=None,
     ) -> None:
         self.config = config
         self.database = database
@@ -82,14 +84,23 @@ class Engine:
         # budget for manual and engine changes together.
         self.price_service = price_service
         self.quantity_service = quantity_service
+        # ebay_app.alerts.Notifier; None or unconfigured = no emails.
+        self.notifier = notifier
         self._dry_run_services: Dict[str, object] = {}
         self._execute_lock = threading.Lock()
 
     # -- pause / status ---------------------------------------------------
 
     def pause(self, reason: str) -> None:
+        already = self.paused_reason()
         self.database.set_engine_state(STATE_PAUSED, reason[:300] or "Paused")
         self.logger.warning("Engine paused: %s", reason)
+        if not already and self.notifier is not None:
+            self.notifier.send(
+                "Engine PAUSED",
+                f"The autonomy engine has paused.\n\nReason: {reason}\n\n"
+                "No job will run until you press Resume on http://127.0.0.1:5000/engine.",
+            )
 
     def resume(self) -> None:
         self.database.delete_engine_state(STATE_PAUSED)
@@ -155,6 +166,7 @@ class Engine:
             if self._restock_due():
                 self.run_restock()
             self.run_auto()
+            self.maybe_send_digest()
         except Exception as error:  # noqa: BLE001 - recorded, counted, never re-raised
             count = int(self.database.get_engine_state(STATE_ERRORS) or "0") + 1
             self.database.set_engine_state(STATE_ERRORS, str(count))
@@ -286,6 +298,46 @@ class Engine:
             if outcome in {"executed", "failed", "unknown", "superseded"}:
                 executed += 1
         return executed
+
+    # -- digest email ---------------------------------------------------------
+
+    def maybe_send_digest(self) -> bool:
+        """At most every APP_ENGINE_DIGEST_HOURS, and only if something
+        happened or is waiting for the owner."""
+        if self.notifier is None or not getattr(self.notifier, "configured", False):
+            return False
+        now = int(self.now())
+        last_raw = self.database.get_engine_state(STATE_LAST_DIGEST)
+        last = int(last_raw) if last_raw and last_raw.isdigit() else 0
+        if last and now - last < self.config.engine_digest_hours * 3600:
+            return False
+        pending = self.database.list_engine_proposals(("pending",), limit=200)
+        waiting = [p for p in pending if p["decision"] == "queue"]
+        finished = [p for p in self.database.list_engine_proposals(
+            ("executed", "failed", "unknown", "superseded"), limit=500) if p["updated_at"] > last]
+        report = (self.status().get("report") or {})
+        no_cost = sum(1 for r in report.get("rows", []) if r.get("status") == "no_cost")
+        if not waiting and not finished:
+            self.database.set_engine_state(STATE_LAST_DIGEST, str(now))
+            return False
+        lines = [f"Mode: {self.config.engine_mode}", ""]
+        if waiting:
+            lines.append(f"{len(waiting)} proposal(s) waiting for your approval:")
+            lines += [f"  {p['sku']}: {p['kind']} {p['current_value']} -> {p['proposed_value']}"
+                      for p in waiting[:20]]
+            lines.append("")
+        if finished:
+            lines.append("Since the last email:")
+            lines += [f"  {p['sku']}: {p['kind']} {p['current_value']} -> {p['proposed_value']} "
+                      f"[{p['status']}] {p.get('outcome') or ''}" for p in finished[:40]]
+            lines.append("")
+        if no_cost:
+            lines.append(f"{no_cost} live listing(s) have no cost recorded and are never repriced.")
+        lines.append("Review: http://127.0.0.1:5000/engine")
+        sent = self.notifier.send(f"Engine digest: {len(waiting)} waiting, {len(finished)} done", "\n".join(lines))
+        if sent:
+            self.database.set_engine_state(STATE_LAST_DIGEST, str(now))
+        return sent
 
     # -- restock job --------------------------------------------------------
 

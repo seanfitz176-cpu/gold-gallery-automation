@@ -2725,6 +2725,104 @@ class AppDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def export_actions(
+        self,
+        *,
+        kinds: Optional[Iterable[str]] = None,
+        statuses: Optional[Iterable[str]] = None,
+        since: Optional[int] = None,
+        until: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return every terminal action matching the given filters, fully decoded.
+
+        This is the queryable/exportable audit report that ``recent_actions()``
+        deliberately is not: no 50-row cap, optional filtering by kind/status/
+        creation-time range, and both the original request (``payload`` -- the
+        "before" values, e.g. ``expected_price``/``new_price``) and the
+        confirmed outcome (``result`` -- the "after"/journaled values,
+        allowlisted exactly like ``get_action_for_admin`` already exposes)
+        for each action. Still never includes a raw eBay request/response
+        body -- those are never stored in the journal in the first place, so
+        there is nothing broader to accidentally leak here. Intended for a
+        local, already-trusted caller (an authenticated admin view or a
+        script run directly against the encrypted database file), the same
+        trust level every other method on this class already assumes.
+        """
+
+        if kinds is not None:
+            kinds = tuple(kinds)
+            for kind in kinds:
+                if kind not in self.ACTION_KINDS:
+                    raise StorageError(f"Unsupported action kind filter: {kind!r}")
+        if statuses is not None:
+            statuses = tuple(statuses)
+            for status in statuses:
+                if status not in self.ACTION_TERMINAL_STATUSES:
+                    raise StorageError(f"Unsupported action status filter: {status!r}")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise StorageError("limit must be a positive integer")
+        if since is not None and (isinstance(since, bool) or not isinstance(since, int)):
+            raise StorageError("since must be an integer timestamp")
+        if until is not None and (isinstance(until, bool) or not isinstance(until, int)):
+            raise StorageError("until must be an integer timestamp")
+
+        clauses = ["status NOT IN ('pending', 'executing')"]
+        params: List[Any] = []
+        if kinds:
+            clauses.append("kind IN (%s)" % ",".join("?" for _ in kinds))
+            params.extend(kinds)
+        if statuses:
+            clauses.append("status IN (%s)" % ",".join("?" for _ in statuses))
+            params.extend(statuses)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("created_at <= ?")
+            params.append(until)
+
+        query = (
+            "SELECT action_id, kind, status, checkpoint, payload_envelope, "
+            "result_envelope, error_message, created_at, updated_at FROM actions "
+            "WHERE " + " AND ".join(clauses) + " ORDER BY created_at ASC"
+        )
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        with self._lock:
+            rows = self._connection.execute(query, params).fetchall()
+
+        records: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(
+                self._cipher.decrypt(
+                    row["payload_envelope"], f"action:{row['action_id']}:payload"
+                )
+            )
+            result = (
+                self._decode_action_result(row["action_id"], row["result_envelope"])
+                if row["result_envelope"]
+                else None
+            )
+            records.append(
+                {
+                    "action_id": row["action_id"],
+                    "kind": row["kind"],
+                    "status": row["status"],
+                    "checkpoint": row["checkpoint"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "error_message": row["error_message"],
+                    "payload": payload if isinstance(payload, dict) else {},
+                    "result": result,
+                }
+            )
+        return records
+
     def _get_completed_action(
         self,
         action_id: str,

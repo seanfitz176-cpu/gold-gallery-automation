@@ -651,6 +651,68 @@ class EbayClientTests(unittest.TestCase):
             )
         self.assertTrue(raised.exception.outcome_unknown)
 
+    def test_well_formed_503_response_marks_a_mutation_unknown(self):
+        # Companion to test_malformed_server_error_marks_a_mutation_unknown
+        # above: that test proves a *malformed* (non-JSON) 500 body marks a
+        # mutation unknown via the _json_body parse-failure path. This proves
+        # the same outcome for a *well-formed* JSON error body, which goes
+        # through the separate non-2xx branch in _api_request instead --
+        # the handling code for this exists but had no direct test (closes
+        # the Phase 9 readiness report's Section 2.6 gap for 500/503).
+        offer = {
+            "offerId": "OFFER-1",
+            "sku": "SKU-1",
+            "status": "PUBLISHED",
+            "pricingSummary": {"price": {"currency": "GBP", "value": "19.99"}},
+        }
+        client, _transport = self.client(
+            [
+                json_response(200, offer),
+                json_response(503, {"errors": [{"message": "Service unavailable"}]}),
+            ]
+        )
+        with self.assertRaises(EbayError) as raised:
+            client.change_price(
+                offer_id="OFFER-1",
+                sku="SKU-1",
+                expected_price="19.99",
+                currency="GBP",
+                new_price="24.99",
+                expected_generation=self.generation(),
+            )
+        self.assertTrue(raised.exception.outcome_unknown)
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(raised.exception.code, "EBAY_API_ERROR")
+
+    def test_rate_limited_429_response_on_a_mutation_is_not_marked_unknown(self):
+        # 429 is a definitive, safe-to-retry failure (no mutation occurred) --
+        # unlike a 500/503, it should NOT be marked outcome_unknown. This is
+        # the other half of the same Section 2.6 test-coverage gap.
+        offer = {
+            "offerId": "OFFER-1",
+            "sku": "SKU-1",
+            "status": "PUBLISHED",
+            "pricingSummary": {"price": {"currency": "GBP", "value": "19.99"}},
+        }
+        client, _transport = self.client(
+            [
+                json_response(200, offer),
+                json_response(429, {"errors": [{"message": "Rate limit exceeded"}]}),
+            ]
+        )
+        with self.assertRaises(EbayError) as raised:
+            client.change_price(
+                offer_id="OFFER-1",
+                sku="SKU-1",
+                expected_price="19.99",
+                currency="GBP",
+                new_price="24.99",
+                expected_generation=self.generation(),
+            )
+        self.assertFalse(raised.exception.outcome_unknown)
+        self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(raised.exception.code, "EBAY_RATE_LIMITED")
+
     @staticmethod
     def _draft():
         return {

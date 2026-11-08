@@ -683,6 +683,116 @@ class StorageTests(unittest.TestCase):
             )
             self.assertEqual(len(database.recent_actions()), 1)
 
+    def test_export_actions_returns_decoded_payload_and_result_for_terminal_actions_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = AppDatabase(Path(directory) / "app.sqlite", b"e" * 32)
+            self.addCleanup(database.close)
+            database.save_refresh_token(
+                "refresh-token", 9999999999, "sandbox-user", new_grant=True
+            )
+            generation = database.connection_generation()
+
+            pending_token = database.create_pending_action(
+                "session-1",
+                "change_price",
+                {"sku": "STILL-PENDING", "expected_price": "9.99", "new_price": "12.99"},
+                expected_generation=generation,
+            )
+            completed_token = database.create_pending_action(
+                "session-1",
+                "change_price",
+                {"sku": "GG-1", "expected_price": "10.00", "new_price": "15.00"},
+                expected_generation=generation,
+            )
+            completed = database.claim_pending_action(completed_token, "session-1")
+            database.complete_action(
+                completed.action_id,
+                "succeeded",
+                result={"sku": "GG-1", "price": "15.00", "currency": "GBP", "dry_run": False},
+            )
+
+            records = database.export_actions()
+
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["action_id"], completed.action_id)
+            self.assertEqual(record["kind"], "change_price")
+            self.assertEqual(record["status"], "succeeded")
+            self.assertEqual(record["payload"]["expected_price"], "10.00")
+            self.assertEqual(record["payload"]["new_price"], "15.00")
+            self.assertEqual(record["result"]["price"], "15.00")
+            self.assertIsInstance(record["created_at"], int)
+            self.assertIsInstance(record["updated_at"], int)
+            # The still-pending action must never appear in an audit export.
+            self.assertNotIn(
+                pending_token, [record.get("action_id") for record in records]
+            )
+
+    def test_export_actions_filters_by_kind_status_and_time_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = AppDatabase(Path(directory) / "app.sqlite", b"f" * 32)
+            self.addCleanup(database.close)
+            database.save_refresh_token(
+                "refresh-token", 9999999999, "sandbox-user", new_grant=True
+            )
+            generation = database.connection_generation()
+
+            price_token = database.create_pending_action(
+                "session-1",
+                "change_price",
+                {"sku": "GG-PRICE", "expected_price": "1.00", "new_price": "2.00"},
+                expected_generation=generation,
+            )
+            price_action = database.claim_pending_action(price_token, "session-1")
+            database.complete_action(
+                price_action.action_id, "succeeded", result={"sku": "GG-PRICE"}
+            )
+
+            quantity_token = database.create_pending_action(
+                "session-1",
+                "change_quantity",
+                {"sku": "GG-QTY", "expected_quantity": 1, "new_quantity": 2},
+                expected_generation=generation,
+            )
+            quantity_action = database.claim_pending_action(quantity_token, "session-1")
+            database.complete_action(
+                quantity_action.action_id,
+                "failed",
+                error_message="boom",
+            )
+
+            # Filter by kind.
+            only_prices = database.export_actions(kinds=["change_price"])
+            self.assertEqual([r["kind"] for r in only_prices], ["change_price"])
+
+            # Filter by status.
+            only_failed = database.export_actions(statuses=["failed"])
+            self.assertEqual([r["action_id"] for r in only_failed], [quantity_action.action_id])
+
+            # Filter by a time range that excludes everything.
+            far_future = int(time.time()) + 1_000_000
+            self.assertEqual(database.export_actions(since=far_future), [])
+
+            # Filter by a time range that includes everything.
+            far_past = int(time.time()) - 1_000_000
+            self.assertEqual(len(database.export_actions(since=far_past)), 2)
+
+            # limit caps the number of rows returned.
+            self.assertEqual(len(database.export_actions(limit=1)), 1)
+
+    def test_export_actions_rejects_invalid_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = AppDatabase(Path(directory) / "app.sqlite", b"g" * 32)
+            self.addCleanup(database.close)
+            with self.assertRaises(StorageError):
+                database.export_actions(kinds=["not_a_real_kind"])
+            with self.assertRaises(StorageError):
+                database.export_actions(statuses=["not_a_real_status"])
+            with self.assertRaises(StorageError):
+                database.export_actions(limit=0)
+            with self.assertRaises(StorageError):
+                database.export_actions(limit=True)  # bool is not a valid limit
+
     def test_pending_action_kind_is_checked_without_consuming_the_capability(self):
         with tempfile.TemporaryDirectory() as directory:
             database = AppDatabase(Path(directory) / "app.sqlite", b"k" * 32)

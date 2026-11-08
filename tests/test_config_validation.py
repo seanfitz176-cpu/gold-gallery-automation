@@ -199,7 +199,7 @@ class ConfigValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ConfigError,
                 "connection, account, listings, orders, drafts, prices, quantities, "
-                "images, migration or setup"
+                "images, migration, publish or setup"
             ):
                 load_config(path, {})
 

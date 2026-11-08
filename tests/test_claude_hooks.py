@@ -86,6 +86,7 @@ class GateHookTests(HookTestCase):
             "python3 run.py",
             "python3 run_production.py",
             "python3 bulk_upload_listings.py listings.csv",
+            "python3 bulk_publish_listings.py listings.csv",
             "python3 migrate_listing.py --item-id 1",
             "python3 find_pilot_candidate.py --production",
             "curl https://api.ebay.com/sell/inventory/v1/offer",

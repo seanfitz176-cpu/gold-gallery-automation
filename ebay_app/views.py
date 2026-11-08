@@ -167,6 +167,17 @@ def oauth_handoff_page(
             "does not publish, delete, change price, change quantity, or add "
             "images."
         )
+    elif feature_stage == "publish":
+        permission = (
+            f"read access to the {environment} user's identity and orders, plus "
+            "Inventory permission to publish existing unpublished offers"
+        )
+        boundary = (
+            "This permission is used only by the standalone bulk_publish_listings.py "
+            "script, run separately by the owner from a terminal, after a typed "
+            "confirmation. There is no dashboard route that uses it -- it does not "
+            "delete, change price, change quantity, or add images."
+        )
     else:
         permission = f"read-only access to the {environment} user's identity"
         boundary = "No listing, order, price or inventory API is enabled."
@@ -201,6 +212,7 @@ def dashboard_page(
     quantity_permission: bool = False,
     image_permission: bool = False,
     migration_permission: bool = False,
+    publish_permission: bool = False,
 ) -> str:
     if feature_stage in {
         "connection",
@@ -213,6 +225,7 @@ def dashboard_page(
         "quantities",
         "images",
         "migration",
+        "publish",
     }:
         required_permission = {
             "drafts": draft_permission,
@@ -222,12 +235,13 @@ def dashboard_page(
             "quantities": quantity_permission,
             "images": image_permission,
             "migration": migration_permission,
+            "publish": publish_permission,
         }.get(feature_stage, listing_permission)
         if (
             feature_stage
             in {
                 "listings", "orders", "drafts", "setup", "prices", "quantities",
-                "images", "migration",
+                "images", "migration", "publish",
             }
             and status.get("connected")
             and status.get("verified")
@@ -241,6 +255,7 @@ def dashboard_page(
                 "quantities": f"Inventory management for {environment} quantity changes",
                 "images": f"Inventory management for {environment} listing images",
                 "migration": f"Inventory management for {environment} listing migration",
+                "publish": f"Inventory management for publishing {environment} listings",
             }.get(feature_stage, "Inventory access")
             button_label = {
                 "drafts": f"Authorize unpublished {environment} drafts",
@@ -250,11 +265,12 @@ def dashboard_page(
                 "quantities": f"Authorize {environment} quantity changes",
                 "images": f"Authorize {environment} image changes",
                 "migration": f"Authorize {environment} listing migration",
+                "publish": f"Authorize {environment} listing publishing",
             }.get(feature_stage, "Authorize read-only listings")
             permission_qualifier = (
                 ""
                 if feature_stage
-                in {"drafts", "setup", "prices", "quantities", "images", "migration"}
+                in {"drafts", "setup", "prices", "quantities", "images", "migration", "publish"}
                 else "read-only "
             )
             connection = f"""<div class="notice warning"><strong>One additional permission is required.</strong>
@@ -557,6 +573,17 @@ def dashboard_page(
             anything in {h(environment)}. There is no dashboard button for this --
             migration is a rare, one-off action, not a recurring change.</p></section>"""
             title = f"Listing migration ({environment})"
+        elif feature_stage == "publish":
+            boundary = f"""<section class="card"><h2>Publishing listings</h2>
+            <p>This stage only adds Inventory-management permission to the existing grant.
+            It makes no eBay change by itself.</p>
+            <p>Once authorized, run
+            <code>python3 bulk_publish_listings.py &lt;csv&gt;</code> in a terminal. That
+            script re-reads every Offer, shows exactly which ones it will publish, honours
+            the dry-run switch and the actions-per-run budget, and requires a typed
+            confirmation before it changes anything in {h(environment)}. There is no
+            dashboard button for this.</p></section>"""
+            title = f"Publishing listings ({environment})"
         else:
             boundary = """<section class="card"><h2>Phase 1 boundary</h2>
             <p>Only OAuth token refresh and <code>GET Identity /user/</code> are enabled.</p>

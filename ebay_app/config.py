@@ -131,6 +131,15 @@ PRODUCTION_WRITE_OPT_INS: Dict[str, Tuple[str, str]] = {
         "APP_ALLOW_PRODUCTION_LISTING_MIGRATION",
         "yes-i-understand-the-risk-of-migrating-a-live-listing",
     ),
+    # Publishing makes an existing UNPUBLISHED Offer live and visible to
+    # buyers via eBay's publishOffer call (same sell.inventory write scope).
+    # Like migration it is its own script-only island, not cumulative with
+    # prices/quantities/images, and like prices/quantities/images it honours
+    # APP_DRY_RUN (which defaults to true in production).
+    "publish": (
+        "APP_ALLOW_PRODUCTION_PUBLISH",
+        "yes-i-understand-the-risk-of-publishing-live-listings",
+    ),
 }
 # Back-compat names for the "prices" entry -- unchanged from before this
 # dict existed, since other modules and tests already import these two names
@@ -201,6 +210,10 @@ def scopes_for_stage(feature_stage: str, fallback: Tuple[str, ...] = ()) -> Tupl
         # same sell.inventory (write) scope drafts/prices/quantities/images
         # already use -- no additional OAuth consent is required to reach
         # this stage either.
+        return DRAFT_SCOPES
+    if feature_stage == "publish":
+        # publishOffer is part of the Sell Inventory API, gated by the same
+        # sell.inventory (write) scope -- no additional OAuth consent needed.
         return DRAFT_SCOPES
     if feature_stage == "setup":
         return SETUP_SCOPES
@@ -477,11 +490,12 @@ def load_config(
         "quantities",
         "images",
         "migration",
+        "publish",
         "setup",
     }:
         raise ConfigError(
             "APP_FEATURE_STAGE must be connection, account, listings, orders, drafts, "
-            "prices, quantities, images, migration or setup"
+            "prices, quantities, images, migration, publish or setup"
         )
     if environment == "production" and feature_stage not in PRODUCTION_READ_ONLY_STAGES:
         write_opt_in = PRODUCTION_WRITE_OPT_INS.get(feature_stage)

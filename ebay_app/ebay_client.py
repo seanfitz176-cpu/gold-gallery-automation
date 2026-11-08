@@ -295,7 +295,7 @@ class EbaySandboxClient:
                     self.config.feature_stage
                     not in {
                         "listings", "orders", "drafts", "prices", "setup",
-                        "quantities", "images", "migration",
+                        "quantities", "images", "migration", "publish",
                     }
                     or self.database.has_granted_scopes(self.config.scopes)
                 ):
@@ -358,7 +358,7 @@ class EbaySandboxClient:
             if upgrading:
                 if self.config.feature_stage not in {
                     "listings", "orders", "drafts", "prices", "setup",
-                    "quantities", "images", "migration",
+                    "quantities", "images", "migration", "publish",
                 }:
                     raise EbayError(
                         "Additional permission cannot be added in this application stage",
@@ -822,6 +822,22 @@ class EbaySandboxClient:
             and method == "POST"
             and path == "/sell/inventory/v1/bulk_migrate_listing"
         )
+        publish_prefix = "/sell/inventory/v1/offer/"
+        publish_offer_id = (
+            path[len(publish_prefix) : -len("/publish")]
+            if path.startswith(publish_prefix) and path.endswith("/publish")
+            else ""
+        )
+        # The one-time-per-offer ``publish`` stage is its own island, like
+        # ``migration``: exactly POST /offer/{offerId}/publish, nothing else.
+        allowed_publish_mutation = (
+            self.config.feature_stage == "publish"
+            and self.config.runtime_mode == "local"
+            and method == "POST"
+            and bool(publish_offer_id)
+            and "/" not in publish_offer_id
+            and len(publish_offer_id) <= 128
+        )
         allowed_setup_mutation = (
             self.config.feature_stage == "setup"
             and self.config.runtime_mode == "local"
@@ -843,6 +859,7 @@ class EbaySandboxClient:
             or allowed_offer_create
             or allowed_price_or_quantity_mutation
             or allowed_migration_mutation
+            or allowed_publish_mutation
             or allowed_setup_mutation
         ):
             raise EbayError(
@@ -1735,6 +1752,30 @@ class EbaySandboxClient:
             yield
 
     @contextmanager
+    def publish_mutation_guard(self):
+        """Serialize one confirmed publish batch for the connected seller.
+
+        Its own island, like ``migration``: publishing makes a listing live
+        and visible to buyers, and nothing about trust earned in price/
+        quantity/image automation should by itself unlock it.
+        """
+
+        if self.config.feature_stage != "publish":
+            raise EbayError(
+                "Publishing a listing is locked in this application stage",
+                status=403,
+                code="MUTATION_LOCKED",
+            )
+        if self.config.runtime_mode != "local":
+            raise EbayError(
+                "Publish mutations are disabled in OAuth authorization mode",
+                status=409,
+                code="PUBLISH_LOCAL_MODE_REQUIRED",
+            )
+        with self._account_lock:
+            yield
+
+    @contextmanager
     def migration_mutation_guard(self):
         """Serialize one confirmed legacy-listing migration for the seller.
 
@@ -2447,6 +2488,114 @@ class EbaySandboxClient:
                 outcome_unknown=status_code is None,
             )
         return {"item_id": listing_id, "raw_response": result}
+
+    def check_offer_publishable(
+        self,
+        binding: VerifiedConnectionBinding,
+        *,
+        offer_id: str,
+        sku: str,
+    ) -> Dict[str, Any]:
+        """Read-only: re-fetch one Offer and confirm it is still the
+        UNPUBLISHED Offer for ``sku`` that the owner reviewed. Used both
+        immediately before a real publish and on its own as the dry run."""
+
+        with self._account_lock:
+            self._assert_draft_permission()
+            self._assert_verified_binding(binding)
+            offer = self.get_offer(offer_id)
+            if not isinstance(offer, Mapping) or offer.get("offerId") != offer_id or offer.get("sku") != sku:
+                raise EbayError(
+                    "The Offer no longer matches the reviewed SKU; nothing was published",
+                    status=409,
+                    code="PUBLISH_OFFER_MISMATCH",
+                )
+            status = offer.get("status")
+            if status == "PUBLISHED":
+                listing = offer.get("listing") if isinstance(offer.get("listing"), Mapping) else {}
+                raise EbayError(
+                    "This Offer is already published; nothing was changed",
+                    status=409,
+                    code="OFFER_ALREADY_PUBLISHED",
+                    details=[{"listingId": listing.get("listingId")}] if listing.get("listingId") else None,
+                )
+            if status != "UNPUBLISHED":
+                raise EbayError(
+                    "The Offer is not in an unpublished state; nothing was published",
+                    status=409,
+                    code="PUBLISH_OFFER_NOT_UNPUBLISHED",
+                )
+            return {"offer_id": offer_id, "sku": sku, "status": status}
+
+    def publish_offer(
+        self,
+        binding: VerifiedConnectionBinding,
+        *,
+        offer_id: str,
+        sku: str,
+    ) -> Dict[str, Any]:
+        """Publish exactly one reviewed UNPUBLISHED Offer, then read it back.
+
+        Re-verifies the Offer immediately before writing (``check_offer_publishable``).
+        A clean eBay rejection (for example a missing required item specific
+        or no image) raises with ``outcome_unknown`` False and full error
+        details. A lost or unrecognisable response raises with
+        ``outcome_unknown`` True -- the listing may be live, so the caller
+        must check Seller Hub rather than retry.
+        """
+
+        with self._account_lock:
+            self.check_offer_publishable(binding, offer_id=offer_id, sku=sku)
+            self._assert_draft_permission()
+            self._assert_verified_binding(binding)
+            response = self._api_request(
+                "POST",
+                f"/sell/inventory/v1/offer/{urllib.parse.quote(offer_id, safe='')}/publish",
+                payload=None,  # publishOffer takes no request body
+                safe_read=False,
+                expected_statuses=(200,),
+                include_raw_payload_on_error=True,
+            )
+            listing_id = response.get("listingId")
+            if (
+                not isinstance(listing_id, str)
+                or not listing_id.strip()
+                or len(listing_id) > 64
+                or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in listing_id)
+            ):
+                raise EbayError(
+                    "eBay did not return a listing ID for the publish request",
+                    code="PUBLISH_RESPONSE_UNRECOGNIZED",
+                    outcome_unknown=True,
+                )
+            warnings = response.get("warnings")
+            try:
+                readback = self.get_offer(offer_id)
+            except EbayError as error:
+                error.outcome_unknown = True
+                raise
+            readback_listing = (
+                readback.get("listing") if isinstance(readback, Mapping) else None
+            )
+            if not (
+                isinstance(readback, Mapping)
+                and readback.get("status") == "PUBLISHED"
+                and isinstance(readback_listing, Mapping)
+                and readback_listing.get("listingId") == listing_id
+            ):
+                raise EbayError(
+                    "The published Offer could not be verified on readback",
+                    status=409,
+                    code="PUBLISH_RECONCILIATION_REQUIRED",
+                    details=[{"listingId": listing_id}],
+                    outcome_unknown=True,
+                )
+            return {
+                "offer_id": offer_id,
+                "sku": sku,
+                "listing_id": listing_id,
+                "warnings": warnings if isinstance(warnings, list) else [],
+            }
 
     @staticmethod
     def inventory_item_image_urls(item: Mapping[str, Any]) -> List[str]:

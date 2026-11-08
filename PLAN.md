@@ -27,11 +27,11 @@ In an interactive session, Esc interrupts immediately.
 - CHECKPOINT: owner reviews, then runs one Sandbox bulk upload with images
 
 ## Phase 2 — Publish step for bulk-created drafts
-- [ ] Design note in `docs/` covering stage, opt-in env var, dry-run behaviour, budget, and failed/partial/unknown handling for publish
-- [ ] `publish_offer` client method behind its own mutation guard and allowlist entry
-- [ ] `bulk_publish_listings.py` script mirroring `bulk_upload_listings.py`'s pre-flight, typed confirmation, dry-run default in production and per-row results
-- [ ] Production opt-in (`APP_ALLOW_PRODUCTION_PUBLISH`) added to `PRODUCTION_WRITE_OPT_INS`, with the config tests
-- [ ] Tests, including outcome-unknown when eBay's response is lost
+- [x] Design note in `docs/` covering stage, opt-in env var, dry-run behaviour, budget, and failed/partial/unknown handling for publish
+- [x] `publish_offer` client method behind its own mutation guard and allowlist entry
+- [x] `bulk_publish_listings.py` script mirroring `bulk_upload_listings.py`'s pre-flight, typed confirmation, dry-run default in production and per-row results
+- [x] Production opt-in (`APP_ALLOW_PRODUCTION_PUBLISH`) added to `PRODUCTION_WRITE_OPT_INS`, with the config tests
+- [x] Tests, including outcome-unknown when eBay's response is lost
 - CHECKPOINT: owner reviews the design and code, then pilots publishing in Sandbox
 
 ## Phase 3 — Autonomy engine design (no code)

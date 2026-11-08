@@ -569,6 +569,10 @@ class WebApplication:
             # broader write/Inventory scope migration needs, exactly like
             # "setup" above.
             "migration": {"/", "/connect", "/connection/verify", "/logout"},
+            # Publish, like migration, happens only through a standalone
+            # script (bulk_publish_listings.py); the dashboard exists for
+            # sign-in and the OAuth permission upgrade only.
+            "publish": {"/", "/connect", "/connection/verify", "/logout"},
         }
         # ``full`` is retained only for the dormant later-stage unit tests. The
         # environment loader rejects it, so a real process can run only an
@@ -638,6 +642,10 @@ class WebApplication:
                         self.database.granted_scopes(), DRAFT_SCOPES
                     ),
                     self.config.feature_stage == "migration"
+                    and granted_scopes_cover(
+                        self.database.granted_scopes(), DRAFT_SCOPES
+                    ),
+                    self.config.feature_stage == "publish"
                     and granted_scopes_cover(
                         self.database.granted_scopes(), DRAFT_SCOPES
                     ),

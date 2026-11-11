@@ -97,6 +97,10 @@ class ShutdownRequested(Exception):
 
 
 def _handle_sigterm(signum, frame) -> None:  # noqa: ARG001 - required signal handler signature
+    # One-shot: a repeated SIGTERM must not interrupt the clean shutdown
+    # already under way (the final log line, stopping the engine thread,
+    # closing the encrypted database).
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     raise ShutdownRequested()
 
 

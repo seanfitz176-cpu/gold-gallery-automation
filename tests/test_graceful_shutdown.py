@@ -31,6 +31,12 @@ class _SigtermHandlerTestsMixin:
         with self.assertRaises(self.module.ShutdownRequested):
             self.module._handle_sigterm(signal.SIGTERM, None)
 
+    def test_a_repeated_sigterm_cannot_interrupt_the_shutdown_in_progress(self):
+        self.module._install_sigterm_handler()
+        with self.assertRaises(self.module.ShutdownRequested):
+            self.module._handle_sigterm(signal.SIGTERM, None)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
     def test_install_registers_the_handler_for_sigterm(self):
         self.module._install_sigterm_handler()
         self.assertIs(signal.getsignal(signal.SIGTERM), self.module._handle_sigterm)

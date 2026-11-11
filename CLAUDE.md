@@ -190,8 +190,11 @@ work tracked in `PLAN.md`):**
   and there's deliberately **no default margin**.
 - **Second seller account** as a separate labelled copy on port 5001
   (`docs/second_account.md`).
-- Next step for all of them: Sean's Sandbox trials, in the order upload →
-  publish → engine in `shadow`.
+- **Sandbox trials passed 2026-11-11** (upload with images, publish, engine in
+  `shadow` including one approved price change). eBay Sandbox stores image
+  links exactly as sent. Still unproven: the market check on a real account,
+  and the second-account copy. Next: Sean's approval of Phases 4 and 5, then
+  the supervised real-account steps, which are his alone.
 
 **Not started:** buyer messaging and order-fulfilment writes. Don't design or
 build these without Sean explicitly asking.
